@@ -1,0 +1,30 @@
+config ABK_FIDO_KEY
+	bool "ABK FIDO2 USB Security Key"
+	depends on USB_GADGET
+	select CRYPTO
+	select CRYPTO_ECC
+	select CRYPTO_HMAC
+	select CRYPTO_SHA256
+	select CRYPTO_AES
+	select CRYPTO_CBC
+	help
+	  Add a kernel-integrated FIDO2 HID authenticator that is injected
+	  into the active Android USB configfs gadget as an extra HID
+	  interface. The implementation exposes a /dev/hidgX debug endpoint
+	  and attempts to load authenticator state from
+	  /data/adb/abk_fido_store.bin.
+
+config ABK_FIDO_KEY_CTAP2
+	bool "Enable CTAP2 core"
+	depends on ABK_FIDO_KEY
+	default y
+
+config ABK_FIDO_KEY_GADGET_AUTO_ATTACH
+	bool "Automatically attach FIDO HID function to configfs gadget"
+	depends on ABK_FIDO_KEY
+	default y
+
+config ABK_FIDO_KEY_PERSIST_ADB_DATA
+	bool "Persist FIDO store under /data/adb"
+	depends on ABK_FIDO_KEY
+	default y

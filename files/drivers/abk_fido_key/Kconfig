@@ -12,7 +12,7 @@ config ABK_FIDO_KEY
 	  into the active Android USB configfs gadget as an extra HID
 	  interface. The implementation exposes a /dev/hidgX debug endpoint
 	  and attempts to load authenticator state from
-	  /data/adb/abk_fido_store.bin.
+	  /metadata/abk_fido_store.bin.
 
 config ABK_FIDO_KEY_CTAP2
 	bool "Enable CTAP2 core"
@@ -24,7 +24,16 @@ config ABK_FIDO_KEY_GADGET_AUTO_ATTACH
 	depends on ABK_FIDO_KEY
 	default y
 
-config ABK_FIDO_KEY_PERSIST_ADB_DATA
-	bool "Persist FIDO store under /data/adb"
+config ABK_FIDO_KEY_PERSIST_METADATA
+	bool "Persist FIDO store under /metadata"
 	depends on ABK_FIDO_KEY
 	default y
+
+config ABK_FIDO_KEY_PERSIST_ADB_DATA
+	bool "Deprecated compatibility toggle for metadata persistence"
+	depends on ABK_FIDO_KEY
+	default y
+	help
+	  Compatibility symbol kept so older ABK defconfigs continue to enable
+	  FIDO persistence after the storage backend moved from /data/adb to
+	  /metadata.

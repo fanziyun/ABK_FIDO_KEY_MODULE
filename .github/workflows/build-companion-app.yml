@@ -1,0 +1,134 @@
+name: Build FIDO Companion
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.1"
+
+      - name: Select Gradle command
+        id: gradle_cmd
+        run: |
+          set -euo pipefail
+          if [ -x "./gradlew" ]; then
+            echo "cmd=./gradlew" >> "$GITHUB_OUTPUT"
+          else
+            echo "cmd=gradle" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare release signing
+        env:
+          ANDROID_SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_SIGNING_KEYSTORE_BASE64}" ]; then
+            echo "ANDROID_SIGNING_KEYSTORE_BASE64 is missing" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/android-signing"
+          printf '%s' "$ANDROID_SIGNING_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/android-signing/release.jks"
+
+      - name: Verify release signing keystore
+        env:
+          ANDROID_SIGNING_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          keytool -list \
+            -keystore "$RUNNER_TEMP/android-signing/release.jks" \
+            -storepass "$ANDROID_SIGNING_KEYSTORE_PASSWORD" \
+            -alias "$ANDROID_SIGNING_KEY_ALIAS" >/dev/null
+
+      - name: Build debug APK
+        run: ${{ steps.gradle_cmd.outputs.cmd }} assembleDebug
+
+      - name: Build release APK
+        env:
+          ANDROID_SIGNING_STORE_FILE: ${{ runner.temp }}/android-signing/release.jks
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
+        run: ${{ steps.gradle_cmd.outputs.cmd }} assembleRelease
+
+      - name: Rename release asset
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/release -type f -name '*release*.apk' | head -n 1)"
+          if [ -z "$apk" ]; then
+            echo "release apk missing" >&2
+            find app/build/outputs/apk/release -maxdepth 3 -type f -print || true
+            exit 1
+          fi
+          mkdir -p dist
+          cp -f "$apk" "dist/abk-fido-companion-release.apk"
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fido-companion-apks
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+            dist/abk-fido-companion-release.apk
+
+      - name: Resolve release target
+        id: release_meta
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "title=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "rolling=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "title=latest" >> "$GITHUB_OUTPUT"
+            echo "rolling=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Move rolling release tag
+        if: steps.release_meta.outputs.rolling == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${{ steps.release_meta.outputs.tag }}" "$GITHUB_SHA"
+          git push origin "refs/tags/${{ steps.release_meta.outputs.tag }}" --force
+
+      - name: Publish release asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_meta.outputs.tag }}"
+          title="${{ steps.release_meta.outputs.title }}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$title" --notes "ABK FIDO companion release"
+          gh release upload "$tag" dist/abk-fido-companion-release.apk --clobber

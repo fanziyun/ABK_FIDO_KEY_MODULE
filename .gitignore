@@ -21,3 +21,14 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+# Android / Gradle
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+
+# Python
+__pycache__/
+*.pyc

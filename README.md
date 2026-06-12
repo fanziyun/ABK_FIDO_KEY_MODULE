@@ -6,7 +6,7 @@ Android phone build into a composite USB FIDO2 security key.
 `abk_fido_key_module` 是一个 ABK 自定义外部内核模块，用来把 Android
 手机侧内核扩展成一个复合 USB FIDO2 Security Key。
 
-Current version / 当前版本: `0.1.0`
+Current version / 当前版本: `0.2.0`
 
 ## Overview / 项目概览
 
@@ -24,7 +24,10 @@ What it adds / 它会增加这些内容:
 - `CONFIG_ABK_FIDO_KEY`
 - `CONFIG_ABK_FIDO_KEY_CTAP2`
 - `CONFIG_ABK_FIDO_KEY_GADGET_AUTO_ATTACH`
-- `CONFIG_ABK_FIDO_KEY_PERSIST_ADB_DATA`
+- `CONFIG_ABK_FIDO_KEY_PERSIST_METADATA`
+- `CONFIG_ABK_FIDO_KEY_PERSIST_ADB_DATA` (compatibility toggle)
+- `app/`: optional Android companion that mirrors the kernel store blob into a
+  SQLite database persisted on `/metadata`
 
 ## Repository Layout / 仓库结构
 
@@ -34,6 +37,8 @@ What it adds / 它会增加这些内容:
 - `files/drivers/abk_fido_key/`: kernel driver source, Kconfig, and Makefile.
 - `files/include/linux/abk_fido_key.h`: public kernel header used by the
   configfs injection point.
+- `app/`, `build.gradle.kts`, `settings.gradle.kts`: minimal Android companion
+  app project for the metadata-backed SQLite mirror.
 
 ## Integration / 接入方式
 
@@ -44,6 +49,8 @@ What it adds / 它会增加这些内容:
 - `python3` available in the build environment.
 - A `common/drivers/usb/gadget/configfs.c` layout compatible with the patch
   anchors used by `scripts/patch_configfs_for_abk_fido.py`.
+- Root access on-device if you want the companion app to mirror the SQLite
+  database into `/metadata`.
 
 ### Generic Example / 通用示例
 
@@ -84,7 +91,8 @@ Then rebuild:
 - `after_patch`: install kernel files and patch
   `common/drivers/usb/gadget/configfs.c`.
 - `before_build`: do everything from `after_patch`, then enable the required
-  `CONFIG_ABK_FIDO_KEY*` symbols in `DEFCONFIG`.
+  `CONFIG_ABK_FIDO_KEY*` symbols in `DEFCONFIG`, including the metadata
+  persistence toggle.
 
 The patch injects `abk_fido_key_prepare_config()` into the gadget config bind
 flow so the `abk_fido` function is added automatically when the USB gadget is
@@ -99,10 +107,16 @@ assembled.
   gadget.
 - Exposes a misc debug node as `/dev/hidgX` where `X` is usually `0` to `3`.
 - Exposes read-only status nodes under `/sys/kernel/abk_fido_key/`:
-  `enabled`, `bound`, `udc`, `hid_dev`, `credential_count`, `last_error`.
+  `enabled`, `bound`, `udc`, `hid_dev`, `credential_count`, `last_error`,
+  `store_generation`.
+- Exposes a write-only reload node under `/sys/kernel/abk_fido_key/reload_store`
+  so userspace can force a reload from the metadata blob.
 - Supports CTAP HID `INIT`, `PING`, `WINK`, `CBOR`, and `CANCEL`.
 - Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `clientPIN`
   (minimal), `reset`, and `selection`.
+- Persists the kernel-side FIDO store blob at `/metadata/abk_fido_store.bin`.
+- The companion app mirrors the latest blob into a SQLite database and exports
+  that database back to `/metadata/abk_fido.db`.
 
 ## Validation / 验证方式
 
@@ -113,11 +127,29 @@ After a successful build and boot, check:
 - `/sys/kernel/abk_fido_key/hid_dev` reports a `hidgX` device name
 - `/sys/kernel/abk_fido_key/bound` becomes `1` after the gadget is bound
 - `/dev/hidgX` exists for packet-level debugging
+- after a credential or PIN change, `/metadata/abk_fido_store.bin` exists
+- after the companion app sync runs, `/metadata/abk_fido.db` exists
+
+## GitHub Release Automation / GitHub 自动发布
+
+- `.github/workflows/build-companion-app.yml` builds debug and release APKs on
+  GitHub Actions.
+- The workflow signs the release APK from GitHub secrets, then uses `gh release`
+  to create or update the target release and upload
+  `abk-fido-companion-release.apk`.
+- Required repository secrets:
+  `ANDROID_SIGNING_KEYSTORE_BASE64`,
+  `ANDROID_SIGNING_KEYSTORE_PASSWORD`,
+  `ANDROID_SIGNING_KEY_ALIAS`,
+  `ANDROID_SIGNING_KEY_PASSWORD`.
+- Pushes to `main` or `master` refresh the rolling `latest` release. Pushing a
+  `v*` tag publishes the asset to the matching tagged release.
 
 ## Metadata / 元数据
 
 Public module metadata lives in `module.conf` and is intended to match the
-published repository.
+published repository. Companion-app metadata is also exported there so ABK can
+offer the FIDO SQLite mirror APK alongside the kernel module.
 
 公开模块元数据位于 `module.conf`，并且应与发布后的仓库保持一致。
 
@@ -129,9 +161,12 @@ published repository.
   emulate a YubiKey.
 - `clientPIN` is intentionally minimal and does not cover full advanced
   credential-management extensions.
-- The store path constant is currently `/data/adb/abk_fido_store.bin`.
-  Existing data can be loaded from that path, but write-back persistence is not
-  finished yet: `abk_fido_maybe_persist_locked()` is still a stub.
+- The kernel blob is the immediate source of truth for runtime state; the
+  companion SQLite database is a mirrored persistence layer that syncs through
+  root shell file copies rather than in-kernel SQLite.
+- If the companion app cannot obtain root, `/metadata/abk_fido.db` will not be
+  refreshed, but the kernel blob at `/metadata/abk_fido_store.bin` still
+  remains the primary persistent store.
 - The configfs patcher depends on specific anchors in
   `common/drivers/usb/gadget/configfs.c`; if the kernel tree diverges, the
   patch step must be updated.

@@ -2,6 +2,10 @@
 
 #include <linux/abk_fido_key.h>
 
+#if IS_ENABLED(CONFIG_ABK_CONTROL)
+#include <linux/abk_control.h>
+#endif
+
 #include <linux/crc32.h>
 #include <linux/err.h>
 #include <linux/file.h>
@@ -52,10 +56,13 @@
 #define ABK_FIDO_MAX_CREDS			32
 #define ABK_FIDO_MAX_CBOR			1536
 #define ABK_FIDO_MAX_SIG_DER			80
-#define ABK_FIDO_STORE_PATH			"/data/adb/abk_fido_store.bin"
+#define ABK_FIDO_STORE_PATH			"/metadata/abk_fido_store.bin"
 #define ABK_FIDO_STORE_MAGIC			0x41424646
 #define ABK_FIDO_STORE_VERSION			1
 #define ABK_FIDO_PIN_RETRIES_DEFAULT		8
+#define ABK_FIDO_PERSIST_ENABLED \
+	(IS_ENABLED(CONFIG_ABK_FIDO_KEY_PERSIST_METADATA) || \
+	 IS_ENABLED(CONFIG_ABK_FIDO_KEY_PERSIST_ADB_DATA))
 
 #define ABK_FIDO_CID_BROADCAST			0xffffffffU
 
@@ -1150,6 +1157,42 @@ static int abk_fido_store_from_disk(struct abk_fido_store_disk *disk)
 	return 0;
 }
 
+static void abk_fido_store_to_disk(struct abk_fido_store_disk *disk)
+{
+	unsigned int i;
+	u32 crc;
+
+	memset(disk, 0, sizeof(*disk));
+	disk->magic = cpu_to_le32(ABK_FIDO_STORE_MAGIC);
+	disk->version = cpu_to_le32(ABK_FIDO_STORE_VERSION);
+	disk->sign_count = cpu_to_le32(abk_fido_dev.store.sign_count);
+	memcpy(disk->aaguid, abk_fido_dev.store.aaguid, sizeof(disk->aaguid));
+	disk->pin_set = abk_fido_dev.store.pin_set ? 1 : 0;
+	disk->pin_retries = abk_fido_dev.store.pin_retries;
+	memcpy(disk->pin_hash, abk_fido_dev.store.pin_hash, sizeof(disk->pin_hash));
+	memcpy(disk->pin_token, abk_fido_dev.store.pin_token, sizeof(disk->pin_token));
+
+	for (i = 0; i < ABK_FIDO_MAX_CREDS; i++) {
+		struct abk_fido_credential *sc = &abk_fido_dev.store.creds[i];
+		struct abk_fido_store_disk_cred *dc = &disk->creds[i];
+
+		dc->in_use = sc->in_use ? 1 : 0;
+		dc->resident = sc->resident ? 1 : 0;
+		dc->user_id_len = sc->user_id_len;
+		memcpy(dc->cred_id, sc->cred_id, sizeof(dc->cred_id));
+		memcpy(dc->user_id, sc->user_id, sizeof(dc->user_id));
+		strscpy(dc->rp_id, sc->rp_id, sizeof(dc->rp_id));
+		strscpy(dc->user_name, sc->user_name, sizeof(dc->user_name));
+		strscpy(dc->user_display, sc->user_display, sizeof(dc->user_display));
+		memcpy(dc->priv_key, sc->priv_key, sizeof(dc->priv_key));
+		memcpy(dc->pub_key, sc->pub_key, sizeof(dc->pub_key));
+	}
+
+	crc = crc32_le(0, (u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count),
+		       sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count));
+	disk->crc32 = cpu_to_le32(crc);
+}
+
 static int abk_fido_init_new_store_locked(void)
 {
 	memset(&abk_fido_dev.store, 0, sizeof(abk_fido_dev.store));
@@ -1169,6 +1212,11 @@ static int abk_fido_load_store_locked(void)
 
 	if (abk_fido_dev.store_loaded)
 		return 0;
+
+	if (!ABK_FIDO_PERSIST_ENABLED) {
+		abk_fido_dev.store_loaded = true;
+		return abk_fido_init_new_store_locked();
+	}
 
 	file = filp_open(ABK_FIDO_STORE_PATH, O_RDONLY, 0);
 	if (IS_ERR(file)) {
@@ -1193,20 +1241,73 @@ static int abk_fido_load_store_locked(void)
 	ret = abk_fido_store_from_disk(disk);
 	kfree(disk);
 	if (ret) {
-		memset(&abk_fido_dev.store, 0, sizeof(abk_fido_dev.store));
-		get_random_bytes(abk_fido_dev.store.aaguid, sizeof(abk_fido_dev.store.aaguid));
-		get_random_bytes(abk_fido_dev.store.pin_token, sizeof(abk_fido_dev.store.pin_token));
-		abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
+		ret = abk_fido_init_new_store_locked();
+		if (ret)
+			return ret;
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "store blob invalid, reinitialized");
 		ret = 0;
+	} else {
+		abk_fido_dev.store_dirty = false;
 	}
 	abk_fido_dev.store_loaded = true;
-	abk_fido_dev.store_dirty = false;
+	abk_fido_dev.store_generation++;
 	return ret;
 }
 
 static int abk_fido_maybe_persist_locked(void)
 {
+	struct abk_fido_store_disk *disk;
+	struct file *file;
+	loff_t pos = 0;
+	ssize_t written;
+	int ret = 0;
+
+	if (!abk_fido_dev.store_dirty)
+		return 0;
+
+	if (!ABK_FIDO_PERSIST_ENABLED) {
+		abk_fido_dev.store_dirty = false;
+		return 0;
+	}
+
+	disk = kzalloc(sizeof(*disk), GFP_KERNEL);
+	if (!disk)
+		return -ENOMEM;
+
+	abk_fido_store_to_disk(disk);
+
+	file = filp_open(ABK_FIDO_STORE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (IS_ERR(file)) {
+		ret = PTR_ERR(file);
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "persist open %s failed: %d", ABK_FIDO_STORE_PATH, ret);
+		kfree(disk);
+		return ret;
+	}
+
+	written = kernel_write(file, disk, sizeof(*disk), &pos);
+	filp_close(file, NULL);
+	kfree(disk);
+
+	if (written != sizeof(struct abk_fido_store_disk)) {
+		ret = written < 0 ? (int)written : -EIO;
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "persist write %s failed: %d", ABK_FIDO_STORE_PATH, ret);
+		return ret;
+	}
+
+	abk_fido_dev.store_dirty = false;
+	abk_fido_dev.store_generation++;
+	abk_fido_dev.last_error[0] = '\0';
 	return 0;
+}
+
+static int abk_fido_reload_store_locked(void)
+{
+	abk_fido_dev.store_loaded = false;
+	abk_fido_dev.store_dirty = false;
+	return abk_fido_load_store_locked();
 }
 
 static void abk_fido_authdata_common(const char *rp_id, u8 flags, u32 sign_count,
@@ -2955,12 +3056,41 @@ static ssize_t last_error_show(struct kobject *kobj, struct kobj_attribute *attr
 	return ret;
 }
 
+static ssize_t store_generation_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = sysfs_emit(buf, "%u\n", abk_fido_dev.store_generation);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
+static ssize_t reload_store_store(struct kobject *kobj, struct kobj_attribute *attr,
+				  const char *buf, size_t count)
+{
+	(void)kobj;
+	(void)attr;
+	(void)buf;
+	int ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = abk_fido_reload_store_locked();
+	if (ret)
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "reload failed: %d", ret);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret ? ret : count;
+}
+
 static struct kobj_attribute enabled_attr = __ATTR_RO(enabled);
 static struct kobj_attribute bound_attr = __ATTR_RO(bound);
 static struct kobj_attribute udc_attr = __ATTR_RO(udc);
 static struct kobj_attribute hid_dev_attr = __ATTR_RO(hid_dev);
 static struct kobj_attribute credential_count_attr = __ATTR_RO(credential_count);
 static struct kobj_attribute last_error_attr = __ATTR_RO(last_error);
+static struct kobj_attribute store_generation_attr = __ATTR_RO(store_generation);
+static struct kobj_attribute reload_store_attr = __ATTR_WO(reload_store);
 
 static struct attribute *abk_fido_attrs[] = {
 	&enabled_attr.attr,
@@ -2969,12 +3099,75 @@ static struct attribute *abk_fido_attrs[] = {
 	&hid_dev_attr.attr,
 	&credential_count_attr.attr,
 	&last_error_attr.attr,
+	&store_generation_attr.attr,
+	&reload_store_attr.attr,
 	NULL,
 };
 
 static const struct attribute_group abk_fido_attr_group = {
 	.attrs = abk_fido_attrs,
 };
+
+#if IS_ENABLED(CONFIG_ABK_CONTROL)
+static bool abk_fido_control_is_enabled(void *data)
+{
+	(void)data;
+	return true;
+}
+
+static int abk_fido_control_set_enabled(bool enabled, void *data)
+{
+	(void)data;
+	return enabled ? 0 : -EOPNOTSUPP;
+}
+
+static int abk_fido_control_run_command(const char *command, void *data)
+{
+	(void)data;
+	int ret = -EINVAL;
+
+	mutex_lock(&abk_fido_dev.lock);
+	if (!strcmp(command, "reload") || !strcmp(command, "reload_store")) {
+		ret = abk_fido_reload_store_locked();
+		if (!ret)
+			abk_fido_dev.last_error[0] = '\0';
+	} else if (!strcmp(command, "persist") || !strcmp(command, "persist_now")) {
+		ret = abk_fido_maybe_persist_locked();
+		if (!ret)
+			abk_fido_dev.last_error[0] = '\0';
+	}
+	if (ret)
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "control command failed: %d", ret);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
+static const struct abk_control_ops abk_fido_control_ops = {
+	.id = "abk_fido_key",
+	.name = "ABK FIDO Key",
+	.version = "0.2.0",
+	.description = "Kernel-side FIDO2 security key with metadata-backed persistence.",
+	.module_dir = "drivers/abk_fido_key",
+	.web_root = "",
+	.extension_id = "abk_fido_store",
+	.companion_package = "com.abk.extension.fido",
+	.companion_display_name = "ABK FIDO Companion",
+	.companion_asset_name = "abk-fido-companion-release.apk",
+	.companion_download_url =
+		"https://github.com/xingguangcuican6666/ABK_FIDO_KEY_MODULE/releases/latest/download/abk-fido-companion-release.apk",
+	.has_web_ui = false,
+	.has_action_script = false,
+	.action_supported = false,
+	.requires_companion_app = true,
+	.settings_supported = false,
+	.per_app_supported = false,
+	.oobe_priority = 90,
+	.is_enabled = abk_fido_control_is_enabled,
+	.set_enabled = abk_fido_control_set_enabled,
+	.run_command = abk_fido_control_run_command,
+};
+#endif
 
 int abk_fido_key_prepare_config(struct usb_composite_dev *cdev,
 				struct usb_configuration *cfg,
@@ -3041,11 +3234,19 @@ static int __init abk_fido_core_init(void)
 	}
 
 	abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
+#if IS_ENABLED(CONFIG_ABK_CONTROL)
+	ret = abk_control_register(&abk_fido_control_ops);
+	if (ret)
+		pr_warn("abk_fido_key: control registration failed: %d\n", ret);
+#endif
 	return 0;
 }
 
 static void __exit abk_fido_core_exit(void)
 {
+#if IS_ENABLED(CONFIG_ABK_CONTROL)
+	abk_control_unregister(&abk_fido_control_ops);
+#endif
 	if (abk_fido_dev.kobj) {
 		sysfs_remove_group(abk_fido_dev.kobj, &abk_fido_attr_group);
 		kobject_put(abk_fido_dev.kobj);
@@ -3056,5 +3257,5 @@ static void __exit abk_fido_core_exit(void)
 module_init(abk_fido_core_init);
 module_exit(abk_fido_core_exit);
 
-MODULE_DESCRIPTION("ABK kernel-integrated FIDO2 HID gadget");
+MODULE_DESCRIPTION("ABK kernel-integrated FIDO2 HID gadget with metadata-backed persistence");
 MODULE_LICENSE("GPL");

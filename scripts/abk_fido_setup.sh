@@ -30,5 +30,6 @@ abk_fido_enable_config() {
   abk_enable_config CONFIG_ABK_FIDO_KEY
   abk_enable_config CONFIG_ABK_FIDO_KEY_CTAP2
   abk_enable_config CONFIG_ABK_FIDO_KEY_GADGET_AUTO_ATTACH
+  abk_enable_config CONFIG_ABK_FIDO_KEY_PERSIST_METADATA
   abk_enable_config CONFIG_ABK_FIDO_KEY_PERSIST_ADB_DATA
 }

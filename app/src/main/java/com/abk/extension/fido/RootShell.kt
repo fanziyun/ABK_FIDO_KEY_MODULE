@@ -29,6 +29,25 @@ internal object RootShell {
         )
     }
 
+    fun readTextFile(path: String): CommandResult {
+        return run(
+            """
+            file=${shellQuote(path)}
+            [ -f "${'$'}file" ] || exit $EXIT_MISSING
+            cat "${'$'}file"
+            """.trimIndent()
+        )
+    }
+
+    fun writeTextFile(path: String, payload: String): CommandResult {
+        return run(
+            """
+            dst=${shellQuote(path)}
+            printf '%s' ${shellQuote(payload)} > "${'$'}dst"
+            """.trimIndent()
+        )
+    }
+
     fun writeFileBase64(path: String, payloadBase64: String): CommandResult {
         return run(
             """
@@ -62,6 +81,16 @@ internal object RootShell {
             cp -f "${'$'}src" "${'$'}dst"
             chown ${ownerUid}:${ownerUid} "${'$'}dst" 2>/dev/null || true
             chmod 0600 "${'$'}dst" 2>/dev/null || true
+            """.trimIndent()
+        )
+    }
+
+    fun launchAbkExtensionManager(): CommandResult {
+        return run(
+            """
+            am start -n 'com.abk.kernel/com.abk.kernel.extensions.AbkExtensionManagerActivity' \
+              --es 'com.abk.kernel.extra.EXTENSION_ID' 'abk_fido_store' \
+              --ez 'bootstrap_mode' 'true'
             """.trimIndent()
         )
     }

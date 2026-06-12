@@ -33,6 +33,7 @@
 #include <linux/usb/g_hid.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <linux/jiffies.h>
 
 #include <asm/unaligned.h>
 
@@ -284,6 +285,17 @@ struct abk_fido_device {
 	char hid_name[16];
 	char udc_name[64];
 	char last_error[160];
+	char last_trace[256];
+	wait_queue_head_t auth_wait;
+	bool auth_gate_enabled;
+	bool auth_pending;
+	bool auth_decided;
+	bool auth_allowed;
+	u32 auth_request_id;
+	u8 auth_pending_ctap_cmd;
+	bool auth_pending_uv;
+	bool auth_pending_rk;
+	char auth_pending_rp_id[ABK_FIDO_MAX_RP_ID];
 	u8 pin_agreement_priv[32];
 	u8 pin_agreement_pub[64];
 	bool pin_agreement_valid;
@@ -688,15 +700,6 @@ static void abk_fido_vli_mod_add(u64 *result, const u64 *left, const u64 *right,
 
 	carry = abk_fido_vli_add(result, left, right, ndigits);
 	if (carry || vli_cmp(result, mod, ndigits) >= 0)
-		vli_sub(result, result, mod, ndigits);
-}
-
-static void abk_fido_vli_mod_from_bytes(u64 *result, const u8 *bytes,
-					size_t len, const u64 *mod,
-					unsigned int ndigits)
-{
-	abk_fido_digits_from_bytes(bytes, len, result, ndigits);
-	while (vli_cmp(result, mod, ndigits) >= 0)
 		vli_sub(result, result, mod, ndigits);
 }
 
@@ -1140,6 +1143,34 @@ static unsigned int abk_fido_count_credentials_locked(void)
 	return count;
 }
 
+static bool abk_fido_bytes_all_zero(const u8 *buf, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		if (buf[i] != 0)
+			return false;
+	}
+	return true;
+}
+
+static bool abk_fido_pin_configured_locked(void)
+{
+	return abk_fido_dev.store.pin_set &&
+	       !abk_fido_bytes_all_zero(abk_fido_dev.store.pin_hash,
+					sizeof(abk_fido_dev.store.pin_hash));
+}
+
+static void abk_fido_set_last_trace_locked(const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+	vscnprintf(abk_fido_dev.last_trace, sizeof(abk_fido_dev.last_trace),
+		   fmt, args);
+	va_end(args);
+}
+
 static int abk_fido_store_from_disk(struct abk_fido_store_disk *disk)
 {
 	unsigned int i;
@@ -1276,6 +1307,16 @@ static int abk_fido_load_store_locked(void)
 		ret = 0;
 	} else {
 		abk_fido_dev.store_dirty = false;
+		if (abk_fido_dev.store.pin_set &&
+		    !abk_fido_pin_configured_locked()) {
+			abk_fido_dev.store.pin_set = false;
+			abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
+			abk_fido_dev.store_dirty = true;
+			snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+				 "invalid pin state recovered");
+			abk_fido_set_last_trace_locked(
+				"store recovery: cleared invalid pin state");
+		}
 	}
 	abk_fido_dev.store_loaded = true;
 	abk_fido_dev.store_generation++;
@@ -1335,6 +1376,112 @@ static int abk_fido_reload_store_locked(void)
 	abk_fido_dev.store_loaded = false;
 	abk_fido_dev.store_dirty = false;
 	return abk_fido_load_store_locked();
+}
+
+static const char *abk_fido_ctap_name(u8 cmd)
+{
+	switch (cmd) {
+	case ABK_FIDO_CTAP_MAKE_CREDENTIAL:
+		return "makeCredential";
+	case ABK_FIDO_CTAP_GET_ASSERTION:
+		return "getAssertion";
+	case ABK_FIDO_CTAP_GET_INFO:
+		return "getInfo";
+	case ABK_FIDO_CTAP_CLIENT_PIN:
+		return "clientPIN";
+	case ABK_FIDO_CTAP_RESET:
+		return "reset";
+	case ABK_FIDO_CTAP_SELECTION:
+		return "selection";
+	default:
+		return "unknown";
+	}
+}
+
+static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, bool rk)
+{
+	long wait_ret;
+	u32 request_id;
+
+	if (!abk_fido_dev.auth_gate_enabled)
+		return 0;
+
+	request_id = ++abk_fido_dev.auth_request_id;
+	abk_fido_dev.auth_pending = true;
+	abk_fido_dev.auth_decided = false;
+	abk_fido_dev.auth_allowed = false;
+	abk_fido_dev.auth_pending_ctap_cmd = ctap_cmd;
+	abk_fido_dev.auth_pending_uv = uv;
+	abk_fido_dev.auth_pending_rk = rk;
+	strscpy(abk_fido_dev.auth_pending_rp_id, rp_id,
+		sizeof(abk_fido_dev.auth_pending_rp_id));
+	snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+		 "awaiting local auth req=%u", request_id);
+	abk_fido_set_last_trace_locked(
+		"auth pending req=%u cmd=%s rp=%s uv=%u rk=%u",
+		request_id, abk_fido_ctap_name(ctap_cmd), rp_id, uv, rk);
+	pr_info("abk_fido_key: auth pending req=%u cmd=%s rp=%s uv=%u rk=%u\n",
+		request_id, abk_fido_ctap_name(ctap_cmd), rp_id, uv, rk);
+	mutex_unlock(&abk_fido_dev.lock);
+	wake_up_interruptible(&abk_fido_dev.auth_wait);
+	wait_ret = wait_event_interruptible_timeout(
+		abk_fido_dev.auth_wait,
+		READ_ONCE(abk_fido_dev.auth_decided),
+		msecs_to_jiffies(30000));
+	mutex_lock(&abk_fido_dev.lock);
+
+	if (wait_ret < 0) {
+		abk_fido_dev.auth_pending = false;
+		abk_fido_set_last_trace_locked(
+			"auth interrupted req=%u cmd=%s", request_id,
+			abk_fido_ctap_name(ctap_cmd));
+		pr_warn("abk_fido_key: auth interrupted req=%u cmd=%s ret=%ld\n",
+			request_id, abk_fido_ctap_name(ctap_cmd), wait_ret);
+		return -EPERM;
+	}
+	if (!wait_ret) {
+		abk_fido_dev.auth_pending = false;
+		abk_fido_dev.auth_decided = false;
+		abk_fido_set_last_trace_locked(
+			"auth timeout req=%u cmd=%s", request_id,
+			abk_fido_ctap_name(ctap_cmd));
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "auth timeout req=%u", request_id);
+		pr_warn("abk_fido_key: auth timeout req=%u cmd=%s\n",
+			request_id, abk_fido_ctap_name(ctap_cmd));
+		return -EPERM;
+	}
+	abk_fido_dev.auth_pending = false;
+	abk_fido_dev.auth_decided = false;
+	if (!abk_fido_dev.auth_allowed) {
+		abk_fido_set_last_trace_locked(
+			"auth denied req=%u cmd=%s", request_id,
+			abk_fido_ctap_name(ctap_cmd));
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "auth denied req=%u", request_id);
+		pr_info("abk_fido_key: auth denied req=%u cmd=%s\n",
+			request_id, abk_fido_ctap_name(ctap_cmd));
+		return -EPERM;
+	}
+	abk_fido_set_last_trace_locked(
+		"auth allowed req=%u cmd=%s", request_id,
+		abk_fido_ctap_name(ctap_cmd));
+	pr_info("abk_fido_key: auth allowed req=%u cmd=%s\n",
+		request_id, abk_fido_ctap_name(ctap_cmd));
+	return 0;
+}
+
+static int abk_fido_auth_decide_locked(bool allow, u32 request_id, bool check_id)
+{
+	if (!abk_fido_dev.auth_pending)
+		return -ENOENT;
+	if (check_id && request_id != abk_fido_dev.auth_request_id)
+		return -ESTALE;
+
+	abk_fido_dev.auth_allowed = allow;
+	abk_fido_dev.auth_decided = true;
+	wake_up_interruptible(&abk_fido_dev.auth_wait);
+	return 0;
 }
 
 static void abk_fido_authdata_common(const char *rp_id, u8 flags, u32 sign_count,
@@ -1882,6 +2029,18 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 	ret = abk_fido_load_store_locked();
 	if (ret && ret != -ENOENT)
 		goto out_unlock;
+	abk_fido_set_last_trace_locked(
+		"makeCredential rp=%s exclude=%u uv=%u rk=%u pin_set=%u pin_retries=%u",
+		req->rp_id, req->exclude_count, req->uv, req->rk,
+		abk_fido_pin_configured_locked(), abk_fido_dev.store.pin_retries);
+	pr_info("abk_fido_key: makeCredential rp=%s exclude=%u uv=%u rk=%u pin_set=%u pin_retries=%u\n",
+		req->rp_id, req->exclude_count, req->uv, req->rk,
+		abk_fido_pin_configured_locked(), abk_fido_dev.store.pin_retries);
+
+	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_MAKE_CREDENTIAL,
+					 req->rp_id, req->uv, req->rk);
+	if (ret)
+		goto out_unlock;
 
 	for (i = 0; i < req->exclude_count; i++) {
 		if (!req->exclude[i].present)
@@ -1994,6 +2153,18 @@ static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_as
 	ret = abk_fido_load_store_locked();
 	if (ret)
 		goto out_unlock;
+	abk_fido_set_last_trace_locked(
+		"getAssertion rp=%s allow=%u uv=%u pin_set=%u pin_retries=%u",
+		req->rp_id, req->allow_count, req->uv,
+		abk_fido_pin_configured_locked(), abk_fido_dev.store.pin_retries);
+	pr_info("abk_fido_key: getAssertion rp=%s allow=%u uv=%u pin_set=%u pin_retries=%u\n",
+		req->rp_id, req->allow_count, req->uv,
+		abk_fido_pin_configured_locked(), abk_fido_dev.store.pin_retries);
+
+	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_GET_ASSERTION,
+					 req->rp_id, req->uv, false);
+	if (ret)
+		goto out_unlock;
 
 	slot = abk_fido_find_rp_credential_locked(req);
 	if (slot < 0) {
@@ -2078,11 +2249,11 @@ static noinline_for_stack int abk_fido_get_info_resp(u8 *payload, size_t *payloa
 	abk_cbor_put_text(&w, "up");
 	abk_cbor_put_bool(&w, true);
 	abk_cbor_put_text(&w, "uv");
-	abk_cbor_put_bool(&w, false);
+	abk_cbor_put_bool(&w, abk_fido_dev.auth_gate_enabled);
 	abk_cbor_put_text(&w, "plat");
 	abk_cbor_put_bool(&w, false);
 	abk_cbor_put_text(&w, "clientPin");
-	abk_cbor_put_bool(&w, abk_fido_dev.store.pin_set);
+	abk_cbor_put_bool(&w, abk_fido_pin_configured_locked());
 	abk_cbor_put_int(&w, 5);
 	abk_cbor_put_uint(&w, ABK_FIDO_MAX_MSG);
 	abk_cbor_put_int(&w, 6);
@@ -2165,6 +2336,13 @@ static noinline_for_stack int abk_fido_client_pin_resp(const u8 *buf, size_t len
 		goto out_unlock;
 
 	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
+	abk_fido_set_last_trace_locked(
+		"clientPIN subcmd=%u pin_set=%u pin_retries=%u key_agreement=%u",
+		req.subcommand, abk_fido_pin_configured_locked(),
+		abk_fido_dev.store.pin_retries, req.key_agreement.present);
+	pr_info("abk_fido_key: clientPIN subcmd=%u pin_set=%u pin_retries=%u key_agreement=%u\n",
+		req.subcommand, abk_fido_pin_configured_locked(),
+		abk_fido_dev.store.pin_retries, req.key_agreement.present);
 
 	switch (req.subcommand) {
 	case ABK_FIDO_CLIENT_PIN_GET_RETRIES:
@@ -2189,7 +2367,7 @@ static noinline_for_stack int abk_fido_client_pin_resp(const u8 *buf, size_t len
 		break;
 	}
 	case ABK_FIDO_CLIENT_PIN_SET_PIN:
-		if (abk_fido_dev.store.pin_set) {
+		if (abk_fido_pin_configured_locked()) {
 			ret = -EALREADY;
 			goto out_unlock;
 		}
@@ -2206,7 +2384,7 @@ static noinline_for_stack int abk_fido_client_pin_resp(const u8 *buf, size_t len
 		ret = abk_fido_maybe_persist_locked();
 		break;
 	case ABK_FIDO_CLIENT_PIN_GET_PIN_TOKEN:
-		if (!abk_fido_dev.store.pin_set) {
+		if (!abk_fido_pin_configured_locked()) {
 			ret = -ENOENT;
 			goto out_unlock;
 		}
@@ -2233,7 +2411,7 @@ static noinline_for_stack int abk_fido_client_pin_resp(const u8 *buf, size_t len
 		abk_cbor_put_bytes(&w, work, sizeof(abk_fido_dev.store.pin_token));
 		break;
 	case ABK_FIDO_CLIENT_PIN_CHANGE_PIN:
-		if (!abk_fido_dev.store.pin_set) {
+		if (!abk_fido_pin_configured_locked()) {
 			ret = -ENOENT;
 			goto out_unlock;
 		}
@@ -2254,6 +2432,15 @@ static noinline_for_stack int abk_fido_client_pin_resp(const u8 *buf, size_t len
 
 	if (w.err && !ret)
 		ret = w.err;
+	if (ret) {
+		abk_fido_set_last_trace_locked(
+			"clientPIN failed subcmd=%u ret=%d pin_set=%u pin_retries=%u",
+			req.subcommand, ret, abk_fido_pin_configured_locked(),
+			abk_fido_dev.store.pin_retries);
+		pr_warn("abk_fido_key: clientPIN failed subcmd=%u ret=%d pin_set=%u pin_retries=%u\n",
+			req.subcommand, ret, abk_fido_pin_configured_locked(),
+			abk_fido_dev.store.pin_retries);
+	}
 	if (!ret)
 		*payload_len = w.pos;
 out_unlock:
@@ -2480,6 +2667,10 @@ static void abk_fido_dispatch_msg(struct abk_fido_usb *usb, u32 cid, u8 cmd,
 						  ABK_FIDO_CTAP_ERR_UNSUPPORTED_OPTION,
 						  NULL, 0);
 		else if (ret == -EALREADY)
+			abk_fido_send_cbor_result(usb, cid,
+						  ABK_FIDO_CTAP_ERR_OPERATION_DENIED,
+						  NULL, 0);
+		else if (ret == -EPERM || ret == -ETIMEDOUT)
 			abk_fido_send_cbor_result(usb, cid,
 						  ABK_FIDO_CTAP_ERR_OPERATION_DENIED,
 						  NULL, 0);
@@ -3093,6 +3284,16 @@ static ssize_t last_error_show(struct kobject *kobj, struct kobj_attribute *attr
 	return ret;
 }
 
+static ssize_t last_trace_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = sysfs_emit(buf, "%s\n", abk_fido_dev.last_trace);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
 static ssize_t store_generation_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	ssize_t ret;
@@ -3120,14 +3321,123 @@ static ssize_t reload_store_store(struct kobject *kobj, struct kobj_attribute *a
 	return ret ? ret : count;
 }
 
+static ssize_t auth_gate_enabled_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = sysfs_emit(buf, "%u\n", abk_fido_dev.auth_gate_enabled);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
+static ssize_t auth_gate_enabled_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buf, size_t count)
+{
+	bool enabled;
+
+	if (sysfs_streq(buf, "1") || sysfs_streq(buf, "true") || sysfs_streq(buf, "on"))
+		enabled = true;
+	else if (sysfs_streq(buf, "0") || sysfs_streq(buf, "false") || sysfs_streq(buf, "off"))
+		enabled = false;
+	else
+		return -EINVAL;
+
+	mutex_lock(&abk_fido_dev.lock);
+	abk_fido_dev.auth_gate_enabled = enabled;
+	abk_fido_set_last_trace_locked("auth gate %s", enabled ? "enabled" : "disabled");
+	mutex_unlock(&abk_fido_dev.lock);
+	return count;
+}
+
+static ssize_t auth_pending_show(struct kobject *kobj,
+				 struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = sysfs_emit(buf, "%u\n", abk_fido_dev.auth_pending);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
+static ssize_t auth_request_id_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = sysfs_emit(buf, "%u\n", abk_fido_dev.auth_request_id);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
+static ssize_t auth_context_show(struct kobject *kobj,
+				 struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = sysfs_emit(buf,
+			 "req=%u pending=%u cmd=%s rp=%s uv=%u rk=%u\n",
+			 abk_fido_dev.auth_request_id,
+			 abk_fido_dev.auth_pending,
+			 abk_fido_ctap_name(abk_fido_dev.auth_pending_ctap_cmd),
+			 abk_fido_dev.auth_pending_rp_id,
+			 abk_fido_dev.auth_pending_uv,
+			 abk_fido_dev.auth_pending_rk);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
+static ssize_t auth_decision_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	bool allow;
+	u32 request_id = 0;
+	bool check_id = false;
+	int ret;
+
+	if (sysfs_streq(buf, "allow")) {
+		allow = true;
+	} else if (sysfs_streq(buf, "deny")) {
+		allow = false;
+	} else if (sscanf(buf, "allow %u", &request_id) == 1) {
+		allow = true;
+		check_id = true;
+	} else if (sscanf(buf, "deny %u", &request_id) == 1) {
+		allow = false;
+		check_id = true;
+	} else {
+		return -EINVAL;
+	}
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = abk_fido_auth_decide_locked(allow, request_id, check_id);
+	if (!ret)
+		abk_fido_set_last_trace_locked("auth %s req=%u",
+			allow ? "allow" : "deny", abk_fido_dev.auth_request_id);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret ? ret : count;
+}
+
 static struct kobj_attribute enabled_attr = __ATTR_RO(enabled);
 static struct kobj_attribute bound_attr = __ATTR_RO(bound);
 static struct kobj_attribute udc_attr = __ATTR_RO(udc);
 static struct kobj_attribute hid_dev_attr = __ATTR_RO(hid_dev);
 static struct kobj_attribute credential_count_attr = __ATTR_RO(credential_count);
 static struct kobj_attribute last_error_attr = __ATTR_RO(last_error);
+static struct kobj_attribute last_trace_attr = __ATTR_RO(last_trace);
 static struct kobj_attribute store_generation_attr = __ATTR_RO(store_generation);
 static struct kobj_attribute reload_store_attr = __ATTR_WO(reload_store);
+static struct kobj_attribute auth_gate_enabled_attr = __ATTR_RW(auth_gate_enabled);
+static struct kobj_attribute auth_pending_attr = __ATTR_RO(auth_pending);
+static struct kobj_attribute auth_request_id_attr = __ATTR_RO(auth_request_id);
+static struct kobj_attribute auth_context_attr = __ATTR_RO(auth_context);
+static struct kobj_attribute auth_decision_attr = __ATTR_WO(auth_decision);
 
 static struct attribute *abk_fido_attrs[] = {
 	&enabled_attr.attr,
@@ -3136,8 +3446,14 @@ static struct attribute *abk_fido_attrs[] = {
 	&hid_dev_attr.attr,
 	&credential_count_attr.attr,
 	&last_error_attr.attr,
+	&last_trace_attr.attr,
 	&store_generation_attr.attr,
 	&reload_store_attr.attr,
+	&auth_gate_enabled_attr.attr,
+	&auth_pending_attr.attr,
+	&auth_request_id_attr.attr,
+	&auth_context_attr.attr,
+	&auth_decision_attr.attr,
 	NULL,
 };
 
@@ -3172,6 +3488,22 @@ static int abk_fido_control_run_command(const char *command, void *data)
 		ret = abk_fido_maybe_persist_locked();
 		if (!ret)
 			abk_fido_dev.last_error[0] = '\0';
+	} else if (!strcmp(command, "auth_allow")) {
+		ret = abk_fido_auth_decide_locked(true, 0, false);
+	} else if (!strcmp(command, "auth_deny")) {
+		ret = abk_fido_auth_decide_locked(false, 0, false);
+	} else if (!strcmp(command, "auth_gate_on")) {
+		abk_fido_dev.auth_gate_enabled = true;
+		ret = 0;
+	} else if (!strcmp(command, "auth_gate_off")) {
+		abk_fido_dev.auth_gate_enabled = false;
+		ret = 0;
+	} else if (!strcmp(command, "pin_reset")) {
+		memset(abk_fido_dev.store.pin_hash, 0, sizeof(abk_fido_dev.store.pin_hash));
+		abk_fido_dev.store.pin_set = false;
+		abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
+		abk_fido_dev.store_dirty = true;
+		ret = abk_fido_maybe_persist_locked();
 	}
 	if (ret)
 		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
@@ -3262,6 +3594,8 @@ static int __init abk_fido_core_init(void)
 	abk_fido_dev.kobj = kobject_create_and_add("abk_fido_key", kernel_kobj);
 	if (!abk_fido_dev.kobj)
 		return -ENOMEM;
+	init_waitqueue_head(&abk_fido_dev.auth_wait);
+	abk_fido_dev.auth_gate_enabled = true;
 
 	ret = sysfs_create_group(abk_fido_dev.kobj, &abk_fido_attr_group);
 	if (ret) {

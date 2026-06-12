@@ -7,4 +7,9 @@
     <string name="service_channel_name">ABK FIDO Sync</string>
     <string name="service_title">ABK FIDO Companion</string>
     <string name="service_text">Synchronizing FIDO metadata persistence</string>
+    <string name="auth_prompt_title">ABK FIDO Verification</string>
+    <string name="auth_prompt_subtitle">Approve security key access for %1$s</string>
+    <string name="auth_biometric_unavailable">No biometric verification available. FIDO request rejected.</string>
+    <string name="auth_biometric_denied">Biometric verification failed. FIDO request rejected.</string>
+    <string name="auth_prompt_launch_failed">Unable to launch biometric prompt. Opening ABK extension page.</string>
 </resources>

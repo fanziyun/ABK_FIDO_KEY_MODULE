@@ -6,33 +6,100 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import kotlin.concurrent.thread
 
 class FidoSyncService : Service() {
+    @Volatile
+    private var running = false
+    @Volatile
+    private var syncRequested = true
+    @Volatile
+    private var lastSyncReason = "service_start"
+    @Volatile
+    private var lastPromptRequestId = -1
+
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, buildNotification())
+        running = true
+        thread(name = "abk-fido-service-loop") {
+            serviceLoop()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val reason = intent?.getStringExtra(EXTRA_REASON)
+        lastSyncReason = intent?.getStringExtra(EXTRA_REASON)
             ?: intent?.action
             ?: "service_restart"
-
-        thread(name = "abk-fido-sync-service") {
-            val result = MetadataSyncCoordinator(applicationContext).syncNow(reason)
-            publishState(result, reason)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf(startId)
-        }
+        syncRequested = true
         return START_STICKY
     }
 
-    override fun onDestroy() = super.onDestroy()
+    override fun onDestroy() {
+        running = false
+        super.onDestroy()
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun serviceLoop() {
+        while (running) {
+            if (syncRequested) {
+                syncRequested = false
+                val result = MetadataSyncCoordinator(applicationContext).syncNow(lastSyncReason)
+                publishState(result, lastSyncReason)
+            }
+
+            runCatching {
+                maybeHandlePendingAuth()
+            }.onFailure {
+                Log.w("AbkFidoCompanion", "auth loop failed", it)
+            }
+
+            try {
+                Thread.sleep(750)
+            } catch (_: InterruptedException) {
+                break
+            }
+        }
+    }
+
+    private fun maybeHandlePendingAuth() {
+        val pending = FidoKernelBridge.readPendingAuthRequest() ?: return
+        if (pending.requestId == lastPromptRequestId || FidoAuthPromptActivity.active) {
+            return
+        }
+        lastPromptRequestId = pending.requestId
+        val launch = Intent(this, FidoAuthPromptActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_NO_ANIMATION or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+            )
+            putExtra(FidoAuthPromptActivity.EXTRA_REQUEST_ID, pending.requestId)
+            putExtra(FidoAuthPromptActivity.EXTRA_COMMAND, pending.command)
+            putExtra(FidoAuthPromptActivity.EXTRA_RP_ID, pending.rpId)
+        }
+        try {
+            startActivity(launch)
+        } catch (t: Throwable) {
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(
+                    this,
+                    getString(R.string.auth_prompt_launch_failed),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            FidoKernelBridge.deny(pending.requestId)
+            RootShell.launchAbkExtensionManager()
+        }
+    }
 
     private fun publishState(result: SyncResult, reason: String) {
         runCatching {

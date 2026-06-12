@@ -640,6 +640,31 @@ static void abk_fido_digits_to_bytes(const u64 *digits, unsigned int ndigits,
 	}
 }
 
+static void abk_fido_p256_scalar_to_bytes(const u64 *digits, u8 out[32])
+{
+	abk_fido_digits_to_bytes(digits, ECC_CURVE_NIST_P256_DIGITS, out, 32);
+}
+
+static void abk_fido_p256_scalar_from_bytes(const u8 bytes[32], u64 *digits)
+{
+	abk_fido_digits_from_bytes(bytes, 32, digits, ECC_CURVE_NIST_P256_DIGITS);
+}
+
+static void abk_fido_p256_pub_to_bytes(const u64 *digits, u8 out[64])
+{
+	abk_fido_digits_to_bytes(digits, ECC_CURVE_NIST_P256_DIGITS, out, 32);
+	abk_fido_digits_to_bytes(digits + ECC_CURVE_NIST_P256_DIGITS,
+				 ECC_CURVE_NIST_P256_DIGITS, out + 32, 32);
+}
+
+static void abk_fido_p256_pub_from_bytes(const u8 bytes[64], u64 *digits)
+{
+	abk_fido_digits_from_bytes(bytes, 32, digits, ECC_CURVE_NIST_P256_DIGITS);
+	abk_fido_digits_from_bytes(bytes + 32, 32,
+				   digits + ECC_CURVE_NIST_P256_DIGITS,
+				   ECC_CURVE_NIST_P256_DIGITS);
+}
+
 static u64 abk_fido_vli_add(u64 *result, const u64 *left, const u64 *right,
 			    unsigned int ndigits)
 {
@@ -714,7 +739,9 @@ static int abk_fido_ecdsa_sign_p256(const u8 priv_bytes[32], const u8 hash_bytes
 		if (ret)
 			continue;
 
-		abk_fido_vli_mod_from_bytes(r, (const u8 *)pub, 32, curve->n, ndigits);
+		memcpy(r, pub, ndigits * sizeof(u64));
+		while (vli_cmp(r, curve->n, ndigits) >= 0)
+			vli_sub(r, r, curve->n, ndigits);
 		if (vli_is_zero(r, ndigits))
 			continue;
 
@@ -723,7 +750,7 @@ static int abk_fido_ecdsa_sign_p256(const u8 priv_bytes[32], const u8 hash_bytes
 		if (vli_is_zero(sum, ndigits))
 			continue;
 
-		abk_fido_digits_from_bytes((const u8 *)k, 32, k_int, ndigits);
+		memcpy(k_int, k, ndigits * sizeof(u64));
 		vli_mod_inv(kinv, k_int, curve->n, ndigits);
 		vli_mod_mult_slow(s, kinv, sum, curve->n, ndigits);
 		if (!vli_is_zero(s, ndigits))
@@ -1890,14 +1917,14 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 			      priv_digits);
 	if (ret)
 		goto revert;
-	memcpy(cred->priv_key, priv_digits, sizeof(cred->priv_key));
+	abk_fido_p256_scalar_to_bytes(priv_digits, cred->priv_key);
 
 	ret = ecc_make_pub_key(ECC_CURVE_NIST_P256, ECC_CURVE_NIST_P256_DIGITS,
 			       priv_digits, pub_digits);
 	if (ret)
 		goto revert;
 
-	memcpy(cred->pub_key, pub_digits, sizeof(cred->pub_key));
+	abk_fido_p256_pub_to_bytes(pub_digits, cred->pub_key);
 
 	if (req->uv)
 		flags |= ABK_FIDO_CRED_FLAG_UV;
@@ -2084,13 +2111,11 @@ static void abk_fido_refresh_pin_agreement_locked(void)
 	if (ecc_gen_privkey(ECC_CURVE_NIST_P256, ECC_CURVE_NIST_P256_DIGITS,
 			    priv_digits))
 		return;
-	memcpy(abk_fido_dev.pin_agreement_priv, priv_digits,
-	       sizeof(abk_fido_dev.pin_agreement_priv));
+	abk_fido_p256_scalar_to_bytes(priv_digits, abk_fido_dev.pin_agreement_priv);
 	if (ecc_make_pub_key(ECC_CURVE_NIST_P256, ECC_CURVE_NIST_P256_DIGITS,
 			     priv_digits, pub_digits))
 		return;
-	memcpy(abk_fido_dev.pin_agreement_pub, pub_digits,
-	       sizeof(abk_fido_dev.pin_agreement_pub));
+	abk_fido_p256_pub_to_bytes(pub_digits, abk_fido_dev.pin_agreement_pub);
 	abk_fido_dev.pin_agreement_valid = true;
 }
 
@@ -2106,8 +2131,8 @@ static int abk_fido_shared_secret_locked(const u8 peer_pub[64], u8 shared_key[32
 	if (!abk_fido_dev.pin_agreement_valid)
 		return -EKEYREJECTED;
 
-	memcpy(priv, abk_fido_dev.pin_agreement_priv, sizeof(abk_fido_dev.pin_agreement_priv));
-	memcpy(pub, peer_pub, sizeof(u64) * ECC_CURVE_NIST_P256_DIGITS * 2);
+	abk_fido_p256_scalar_from_bytes(abk_fido_dev.pin_agreement_priv, priv);
+	abk_fido_p256_pub_from_bytes(peer_pub, pub);
 	ret = crypto_ecdh_shared_secret(ECC_CURVE_NIST_P256,
 					ECC_CURVE_NIST_P256_DIGITS,
 					priv, pub, secret);
@@ -2394,6 +2419,7 @@ static void abk_fido_dispatch_msg(struct abk_fido_usb *usb, u32 cid, u8 cmd,
 	u8 payload[ABK_FIDO_MAX_CBOR];
 	size_t payload_len = 0;
 	u8 init_resp[17];
+	u8 cbor_cmd = len ? data[0] : 0;
 	u32 new_cid;
 	int ret;
 
@@ -2431,10 +2457,13 @@ static void abk_fido_dispatch_msg(struct abk_fido_usb *usb, u32 cid, u8 cmd,
 		return;
 	case ABK_FIDO_HID_CBOR:
 		ret = abk_fido_cbor_dispatch(data, len, payload, &payload_len);
-		if (!ret)
+		if (!ret) {
+			mutex_lock(&abk_fido_dev.lock);
+			abk_fido_dev.last_error[0] = '\0';
+			mutex_unlock(&abk_fido_dev.lock);
 			abk_fido_send_cbor_result(usb, cid, ABK_FIDO_CTAP_SUCCESS,
 						  payload, payload_len);
-		else if (ret == -EEXIST)
+		} else if (ret == -EEXIST)
 			abk_fido_send_cbor_result(usb, cid,
 						  ABK_FIDO_CTAP_ERR_CREDENTIAL_EXCLUDED,
 						  NULL, 0);
@@ -2466,6 +2495,14 @@ static void abk_fido_dispatch_msg(struct abk_fido_usb *usb, u32 cid, u8 cmd,
 			abk_fido_send_cbor_result(usb, cid,
 						  ABK_FIDO_CTAP_ERR_INVALID_PARAMETER,
 						  NULL, 0);
+		if (ret) {
+			mutex_lock(&abk_fido_dev.lock);
+			snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+				 "ctap cmd 0x%02x failed: %d", cbor_cmd, ret);
+			mutex_unlock(&abk_fido_dev.lock);
+			pr_warn("abk_fido_key: ctap cmd 0x%02x failed: %d\n",
+				cbor_cmd, ret);
+		}
 		return;
 	default:
 		abk_fido_send_hid_error(usb, cid, ABK_FIDO_HID_ERR_INVALID_CMD);

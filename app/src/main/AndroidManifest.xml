@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <queries>
+        <package android:name="com.abk.kernel" />
+    </queries>
+
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -9,6 +13,31 @@
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true">
+
+        <activity
+            android:name=".FidoBootstrapActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:finishOnTaskLaunch="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="com.abk.kernel.action.ABK_EXTENSION" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="com.abk.kernel.extension.ID"
+                android:value="abk_fido_store" />
+            <meta-data
+                android:name="com.abk.kernel.extension.NAME"
+                android:value="ABK FIDO Companion" />
+            <meta-data
+                android:name="com.abk.kernel.extension.OOBE_ACTIVITY"
+                android:value=".FidoBootstrapActivity" />
+            <meta-data
+                android:name="com.abk.kernel.extension.SETTINGS_ACTIVITY"
+                android:value=".FidoBootstrapActivity" />
+        </activity>
 
         <activity
             android:name=".FidoAuthPromptActivity"

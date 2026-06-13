@@ -6,14 +6,25 @@ import android.util.Base64
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.io.File
+import java.util.zip.CRC32
 import kotlin.math.min
 
 private const val LOCAL_DB_NAME = "abk_fido.db"
 private const val METADATA_DB_PATH = "/metadata/abk_fido.db"
 private const val METADATA_BLOB_PATH = "/metadata/abk_fido_store.bin"
-private const val STORE_DISK_HEADER_SIZE = 60
-private const val STORE_DISK_CRED_SIZE = 356
+private const val STORE_DISK_CRC_OFFSET = 8
+private const val STORE_DISK_SIGN_COUNT_OFFSET = 12
+private const val STORE_DISK_AAGUID_OFFSET = 16
+private const val STORE_DISK_PIN_SET_OFFSET = 32
+private const val STORE_DISK_PIN_RETRIES_OFFSET = 33
+private const val STORE_DISK_PIN_HASH_OFFSET = 36
+private const val STORE_DISK_PIN_TOKEN_OFFSET = 52
+private const val STORE_DISK_HEADER_SIZE = 84
+private const val STORE_DISK_CRED_SIZE = 452
 private const val STORE_DISK_MAX_CREDS = 32
+private const val STORE_DISK_CRED_ID_OFFSET = 4
+private const val STORE_DISK_CRED_RP_ID_OFFSET = 100
+private const val STORE_DISK_CRED_RP_ID_SIZE = 128
 private val syncLock = Any()
 
 data class SyncResult(
@@ -71,57 +82,41 @@ internal class MetadataSyncCoordinator(context: Context) {
             } else {
                 null
             }
-            val mergedLocalBlob = mergeStoreSnapshots(
-                preferred = localBlob,
-                fallback = metadataBlobBytes
+            val mergedBlob = mergeStoreSnapshots(
+                mergeStoreSnapshots(localBlob, metadataBlobBytes),
+                if (kernelCredentialCount > 0) kernelBlobBytes else null
             )
-            if (mergedLocalBlob != null && (localBlob == null || !mergedLocalBlob.contentEquals(localBlob))) {
-                repository.saveSnapshot(mergedLocalBlob)
-                notes += "merged sqlite snapshot with metadata blob"
-            }
-            val effectiveLocalBlob = mergedLocalBlob ?: localBlob
 
-            if (kernelBlobBytes != null && kernelCredentialCount > 0) {
-                if (effectiveLocalBlob == null || !kernelBlobBytes.contentEquals(effectiveLocalBlob)) {
-                    repository.saveSnapshot(kernelBlobBytes)
-                    notes += "captured kernel blob into sqlite"
+            if (mergedBlob != null) {
+                if (localBlob == null || !mergedBlob.contentEquals(localBlob)) {
+                    repository.saveSnapshot(mergedBlob)
+                    notes += "updated sqlite snapshot from merged blobs"
                 } else {
-                    notes += "kernel blob already mirrored"
+                    notes += "sqlite snapshot already up to date"
                 }
+
+                if (kernelBlobBytes == null || !mergedBlob.contentEquals(kernelBlobBytes) ||
+                    mergedBlob.storeCredentialCount() != kernelCredentialCount) {
+                    val restoreKernel = FidoKernelBridge.writeStoreBlobBase64(
+                        Base64.encodeToString(mergedBlob, Base64.NO_WRAP)
+                    )
+                    if (restoreKernel.success) {
+                        notes += "restored merged blob into kernel"
+                    } else {
+                        notes += "kernel blob restore via sysfs failed"
+                    }
+                } else {
+                    notes += "kernel blob already up to date"
+                }
+
                 val exportBlob = RootShell.writeFileBase64(
                     path = METADATA_BLOB_PATH,
-                    payloadBase64 = Base64.encodeToString(kernelBlobBytes, Base64.NO_WRAP)
+                    payloadBase64 = Base64.encodeToString(mergedBlob, Base64.NO_WRAP)
                 )
                 if (!exportBlob.success) {
-                    notes += "kernel blob exported to sqlite only"
-                } else {
-                    notes += "exported kernel blob to /metadata"
+                    return SyncResult(false, notes + "failed to export merged blob to /metadata")
                 }
-            } else if (effectiveLocalBlob != null) {
-                val restoreKernel = FidoKernelBridge.writeStoreBlobBase64(
-                    Base64.encodeToString(effectiveLocalBlob, Base64.NO_WRAP)
-                )
-                if (restoreKernel.success) {
-                    FidoKernelBridge.reloadStore()
-                    notes += "restored kernel blob from sqlite"
-                } else {
-                    notes += "kernel blob restore via sysfs failed"
-                }
-                val exportBlob = RootShell.writeFileBase64(
-                    path = METADATA_BLOB_PATH,
-                    payloadBase64 = Base64.encodeToString(effectiveLocalBlob, Base64.NO_WRAP)
-                )
-                if (!exportBlob.success) {
-                    return SyncResult(false, notes + "failed to restore kernel blob to /metadata")
-                }
-                notes += "restored metadata blob from sqlite"
-            } else if (metadataBlobBytes != null) {
-                if (effectiveLocalBlob == null || !metadataBlobBytes.contentEquals(effectiveLocalBlob)) {
-                    repository.saveSnapshot(metadataBlobBytes)
-                    notes += "captured metadata blob into sqlite"
-                } else {
-                    notes += "metadata blob already mirrored"
-                }
+                notes += "exported merged blob to /metadata"
             } else {
                 notes += "kernel blob not found"
             }
@@ -212,12 +207,12 @@ private data class StoreDiskSnapshot(
     fun encode(): ByteArray {
         val out = raw.copyOf()
         val buffer = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
-        buffer.putInt(12, signCount)
-        System.arraycopy(aaguid, 0, out, 16, 16)
-        out[32] = pinSet
-        out[33] = pinRetries
-        System.arraycopy(pinHash, 0, out, 36, 16)
-        System.arraycopy(pinToken, 0, out, 52, 32)
+        buffer.putInt(STORE_DISK_SIGN_COUNT_OFFSET, signCount)
+        System.arraycopy(aaguid, 0, out, STORE_DISK_AAGUID_OFFSET, 16)
+        out[STORE_DISK_PIN_SET_OFFSET] = pinSet
+        out[STORE_DISK_PIN_RETRIES_OFFSET] = pinRetries
+        System.arraycopy(pinHash, 0, out, STORE_DISK_PIN_HASH_OFFSET, 16)
+        System.arraycopy(pinToken, 0, out, STORE_DISK_PIN_TOKEN_OFFSET, 32)
         var cursor = STORE_DISK_HEADER_SIZE
         repeat(STORE_DISK_MAX_CREDS) { slotIndex ->
             val slot = creds.elementAtOrNull(slotIndex)
@@ -225,25 +220,32 @@ private data class StoreDiskSnapshot(
             System.arraycopy(slotBytes, 0, out, cursor, min(slotBytes.size, STORE_DISK_CRED_SIZE))
             cursor += STORE_DISK_CRED_SIZE
         }
+        val crc = CRC32().apply {
+            update(out, STORE_DISK_SIGN_COUNT_OFFSET, out.size - STORE_DISK_SIGN_COUNT_OFFSET)
+        }.value.toInt()
+        buffer.putInt(STORE_DISK_CRC_OFFSET, crc)
         return out
     }
 
     companion object {
         fun parse(bytes: ByteArray): StoreDiskSnapshot? {
             if (bytes.size < STORE_DISK_HEADER_SIZE) return null
-            val signCount = ByteBuffer.wrap(bytes, 12, 4).order(ByteOrder.LITTLE_ENDIAN).int
-            val aaguid = bytes.copyOfRange(16, 32)
-            val pinSet = bytes[32]
-            val pinRetries = bytes[33]
-            val pinHash = bytes.copyOfRange(36, 52)
-            val pinToken = bytes.copyOfRange(52, 84)
+            val signCount = ByteBuffer.wrap(bytes, STORE_DISK_SIGN_COUNT_OFFSET, 4).order(ByteOrder.LITTLE_ENDIAN).int
+            val aaguid = bytes.copyOfRange(STORE_DISK_AAGUID_OFFSET, STORE_DISK_AAGUID_OFFSET + 16)
+            val pinSet = bytes[STORE_DISK_PIN_SET_OFFSET]
+            val pinRetries = bytes[STORE_DISK_PIN_RETRIES_OFFSET]
+            val pinHash = bytes.copyOfRange(STORE_DISK_PIN_HASH_OFFSET, STORE_DISK_PIN_HASH_OFFSET + 16)
+            val pinToken = bytes.copyOfRange(STORE_DISK_PIN_TOKEN_OFFSET, STORE_DISK_PIN_TOKEN_OFFSET + 32)
             val creds = mutableListOf<CredSlot>()
             var cursor = STORE_DISK_HEADER_SIZE
             repeat(min((bytes.size - STORE_DISK_HEADER_SIZE) / STORE_DISK_CRED_SIZE, STORE_DISK_MAX_CREDS)) { index ->
                 val blob = bytes.copyOfRange(cursor, cursor + STORE_DISK_CRED_SIZE)
                 val inUse = blob[0].toInt() == 1
-                val credId = blob.copyOfRange(4, 36)
-                val rpIdBytes = blob.copyOfRange(100, 228)
+                val credId = blob.copyOfRange(STORE_DISK_CRED_ID_OFFSET, STORE_DISK_CRED_ID_OFFSET + 32)
+                val rpIdBytes = blob.copyOfRange(
+                    STORE_DISK_CRED_RP_ID_OFFSET,
+                    STORE_DISK_CRED_RP_ID_OFFSET + STORE_DISK_CRED_RP_ID_SIZE
+                )
                 val rpId = rpIdBytes.takeWhile { it != 0.toByte() }.toByteArray().toString(Charsets.UTF_8)
                 creds += CredSlot(index, blob, credId, rpId, inUse)
                 cursor += STORE_DISK_CRED_SIZE

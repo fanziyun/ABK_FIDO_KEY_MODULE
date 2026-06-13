@@ -66,6 +66,12 @@
             android:directBootAware="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <provider
+            android:name=".FidoInitProvider"
+            android:authorities="${applicationId}.init"
+            android:directBootAware="true"
+            android:exported="false" />
     </application>
 
 </manifest>

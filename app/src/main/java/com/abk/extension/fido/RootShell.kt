@@ -57,6 +57,7 @@ internal object RootShell {
     fun writeTextFile(path: String, payload: String): CommandResult {
         return run(
             """
+            set -e
             dst=${shellQuote(path)}
             printf '%s' ${shellQuote(payload)} > "${'$'}dst"
             """.trimIndent()
@@ -66,6 +67,7 @@ internal object RootShell {
     fun writeFileBase64(path: String, payloadBase64: String): CommandResult {
         return run(
             """
+            set -e
             dst=${shellQuote(path)}
             printf '%s' ${shellQuote(payloadBase64)} | base64 -d > "${'$'}dst"
             chmod 0600 "${'$'}dst" 2>/dev/null || true

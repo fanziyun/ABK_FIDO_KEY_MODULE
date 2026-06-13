@@ -301,6 +301,8 @@ struct abk_fido_device {
 	char auth_pending_rp_id[ABK_FIDO_MAX_RP_ID];
 	bool auth_cache_valid;
 	unsigned long auth_cache_expires;
+	u8 *store_blob_staging;
+	size_t store_blob_staging_len;
 	u8 pin_agreement_priv[32];
 	u8 pin_agreement_pub[64];
 	bool pin_agreement_valid;
@@ -653,28 +655,41 @@ static ssize_t abk_fido_store_blob_write(struct file *filp, struct kobject *kobj
 	size_t size = sizeof(*disk);
 	int ret;
 
-	if (off != 0 || count != size)
+	if (off < 0 || off >= size || count > size - off)
 		return -EINVAL;
 
-	disk = kvzalloc(sizeof(*disk), GFP_KERNEL);
-	if (!disk)
-		return -ENOMEM;
-
-	memcpy(disk, buf, size);
-
 	mutex_lock(&abk_fido_dev.lock);
-	ret = abk_fido_store_from_disk(disk);
-	if (!ret) {
-		abk_fido_dev.store_loaded = true;
-		abk_fido_dev.store_dirty = false;
-		abk_fido_dev.store_generation++;
-		abk_fido_set_last_trace_locked("store blob restored from userspace");
-		pr_info("abk_fido_key: store blob restored from userspace\n");
+	if (!abk_fido_dev.store_blob_staging) {
+		abk_fido_dev.store_blob_staging = kvzalloc(size, GFP_KERNEL);
+		abk_fido_dev.store_blob_staging_len = 0;
+	}
+	if (!abk_fido_dev.store_blob_staging) {
+		mutex_unlock(&abk_fido_dev.lock);
+		return -ENOMEM;
+	}
+
+	memcpy(abk_fido_dev.store_blob_staging + off, buf, count);
+	abk_fido_dev.store_blob_staging_len = max_t(size_t,
+		abk_fido_dev.store_blob_staging_len, off + count);
+
+	if (abk_fido_dev.store_blob_staging_len == size) {
+		disk = (struct abk_fido_store_disk *)abk_fido_dev.store_blob_staging;
+		ret = abk_fido_store_from_disk(disk);
+		if (!ret) {
+			abk_fido_dev.store_loaded = true;
+			abk_fido_dev.store_dirty = false;
+			abk_fido_dev.store_generation++;
+			abk_fido_set_last_trace_locked("store blob restored from userspace");
+			pr_info("abk_fido_key: store blob restored from userspace\n");
+		}
+		kvfree(abk_fido_dev.store_blob_staging);
+		abk_fido_dev.store_blob_staging = NULL;
+		abk_fido_dev.store_blob_staging_len = 0;
+		mutex_unlock(&abk_fido_dev.lock);
+		return ret ? ret : count;
 	}
 	mutex_unlock(&abk_fido_dev.lock);
-
-	kvfree(disk);
-	return ret ? ret : count;
+	return count;
 }
 
 static struct file *abk_fido_filp_open_kernel(const char *path, int flags, umode_t mode)
@@ -3843,6 +3858,9 @@ static void __exit abk_fido_core_exit(void)
 #if IS_ENABLED(CONFIG_ABK_CONTROL)
 	abk_control_unregister(&abk_fido_control_ops);
 #endif
+	kvfree(abk_fido_dev.store_blob_staging);
+	abk_fido_dev.store_blob_staging = NULL;
+	abk_fido_dev.store_blob_staging_len = 0;
 	if (abk_fido_dev.kobj) {
 		sysfs_remove_bin_file(abk_fido_dev.kobj, &store_blob_attr);
 		sysfs_remove_group(abk_fido_dev.kobj, &abk_fido_attr_group);

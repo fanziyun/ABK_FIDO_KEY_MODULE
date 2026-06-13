@@ -457,6 +457,9 @@ static struct usb_gadget_strings *abk_fido_func_strings[] = {
 	NULL,
 };
 
+static void abk_fido_store_to_disk(struct abk_fido_store_disk *disk);
+static int abk_fido_load_store_locked(void);
+
 enum {
 	ABK_FIDO_STRING_INTERFACE = 0,
 };
@@ -585,7 +588,7 @@ static int abk_fido_sha256(const u8 *data, size_t len, u8 out[SHA256_DIGEST_SIZE
 
 static void abk_fido_bootstrap_companion_service(void)
 {
-	static char *const argv[] = {
+	static char *argv[] = {
 		"/system/bin/am",
 		"start-foreground-service",
 		"-n",
@@ -595,7 +598,7 @@ static void abk_fido_bootstrap_companion_service(void)
 		"kernel_boot",
 		NULL,
 	};
-	static char *const envp[] = {
+	static char *envp[] = {
 		"HOME=/",
 		"PATH=/system/bin:/system/xbin:/vendor/bin:/vendor/xbin",
 		NULL,

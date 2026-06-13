@@ -97,11 +97,13 @@ internal class MetadataSyncCoordinator(context: Context) {
 
                 if (kernelBlobBytes == null || !mergedBlob.contentEquals(kernelBlobBytes) ||
                     mergedBlob.storeCredentialCount() != kernelCredentialCount) {
+                    val targetCount = mergedBlob.storeCredentialCount()
                     val restoreKernel = FidoKernelBridge.writeStoreBlobBase64(
                         Base64.encodeToString(mergedBlob, Base64.NO_WRAP)
                     )
                     if (restoreKernel.success) {
-                        notes += "restored merged blob into kernel"
+                        val restoredCount = FidoKernelBridge.waitForCredentialCountAtLeast(targetCount)
+                        notes += "restored merged blob into kernel(count=${restoredCount ?: -1}/$targetCount)"
                     } else {
                         notes += "kernel blob restore via sysfs failed"
                     }

@@ -92,4 +92,15 @@ internal object FidoKernelBridge {
 
     fun reloadStore(): RootShell.CommandResult =
         RootShell.writeTextFile(RELOAD_STORE_PATH, "1\n")
+
+    fun waitForCredentialCountAtLeast(target: Int, attempts: Int = 20, delayMs: Long = 200): Int? {
+        repeat(attempts) {
+            val count = readCredentialCount()
+            if (count != null && count >= target) {
+                return count
+            }
+            Thread.sleep(delayMs)
+        }
+        return readCredentialCount()
+    }
 }

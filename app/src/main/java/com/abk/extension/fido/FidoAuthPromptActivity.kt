@@ -3,6 +3,7 @@ package com.abk.extension.fido
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.widget.Toast
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -16,7 +17,9 @@ class FidoAuthPromptActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestId = intent.getIntExtra(EXTRA_REQUEST_ID, -1)
+        Log.i(TAG, "onCreate requestId=$requestId expected=${BiometricAuthBridge.expectedRequestId}")
         if (requestId <= 0 || requestId != BiometricAuthBridge.expectedRequestId) {
+            Log.w(TAG, "finish early due to invalid request id")
             finish()
             return
         }
@@ -30,6 +33,7 @@ class FidoAuthPromptActivity : FragmentActivity() {
                 BiometricManager.Authenticators.BIOMETRIC_STRONG or
                 BiometricManager.Authenticators.DEVICE_CREDENTIAL
         val canAuth = biometricManager.canAuthenticate(authenticators)
+        Log.i(TAG, "canAuthenticate=$canAuth rp=${rpId.ifBlank { command }}")
         if (canAuth != BiometricManager.BIOMETRIC_SUCCESS) {
             sendResultAndFinish(false, getString(R.string.auth_biometric_unavailable))
             return
@@ -40,10 +44,12 @@ class FidoAuthPromptActivity : FragmentActivity() {
             ContextCompat.getMainExecutor(this),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    Log.i(TAG, "authentication succeeded requestId=$requestId")
                     sendResultAndFinish(true, null)
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    Log.w(TAG, "authentication error requestId=$requestId code=$errorCode msg=$errString")
                     sendResultAndFinish(
                         false,
                         if (errString.isNotBlank()) errString.toString()
@@ -64,12 +70,14 @@ class FidoAuthPromptActivity : FragmentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.i(TAG, "onDestroy requestId=$requestId isResultSent=$isResultSent")
         sendResultAndFinish(false, null)
     }
 
     private fun sendResultAndFinish(success: Boolean, message: String?) {
         if (isResultSent) return
         isResultSent = true
+        Log.i(TAG, "sendResultAndFinish requestId=$requestId success=$success message=${message.orEmpty()}")
         if (!message.isNullOrBlank()) {
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
@@ -80,6 +88,7 @@ class FidoAuthPromptActivity : FragmentActivity() {
     }
 
     companion object {
+        private const val TAG = "AbkFidoAuth"
         const val EXTRA_REQUEST_ID = "request_id"
         const val EXTRA_COMMAND = "command"
         const val EXTRA_RP_ID = "rp_id"

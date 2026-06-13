@@ -20,14 +20,18 @@ class FidoSyncService : Service() {
     @Volatile
     private var syncRequested = true
     @Volatile
+    private var syncInFlight = false
+    @Volatile
     private var lastSyncReason = "service_start"
     @Volatile
     private var lastPromptRequestId = -1
+    private val syncStateLock = Any()
 
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, buildNotification())
         running = true
+        Log.i(TAG, "service created")
         thread(name = "abk-fido-service-loop") {
             serviceLoop()
         }
@@ -38,11 +42,13 @@ class FidoSyncService : Service() {
             ?: intent?.action
             ?: "service_restart"
         syncRequested = true
+        Log.i(TAG, "onStartCommand reason=$lastSyncReason")
         return START_STICKY
     }
 
     override fun onDestroy() {
         running = false
+        Log.i(TAG, "service destroyed")
         super.onDestroy()
     }
 
@@ -50,17 +56,13 @@ class FidoSyncService : Service() {
 
     private fun serviceLoop() {
         while (running) {
-            if (syncRequested) {
-                syncRequested = false
-                val result = MetadataSyncCoordinator(applicationContext).syncNow(lastSyncReason)
-                publishState(result, lastSyncReason)
-            }
-
             runCatching {
                 maybeHandlePendingAuth()
             }.onFailure {
                 Log.w("AbkFidoCompanion", "auth loop failed", it)
             }
+
+            kickSyncIfNeeded()
 
             try {
                 Thread.sleep(750)
@@ -70,19 +72,46 @@ class FidoSyncService : Service() {
         }
     }
 
+    private fun kickSyncIfNeeded() {
+        var reason = ""
+        synchronized(syncStateLock) {
+            if (!syncRequested || syncInFlight) {
+                return
+            }
+            syncRequested = false
+            syncInFlight = true
+            reason = lastSyncReason
+        }
+        thread(name = "abk-fido-sync") {
+            try {
+                Log.i(TAG, "running sync reason=$reason")
+                val result = MetadataSyncCoordinator(applicationContext).syncNow(reason)
+                publishState(result, reason)
+            } finally {
+                synchronized(syncStateLock) {
+                    syncInFlight = false
+                }
+            }
+        }
+    }
+
     private fun maybeHandlePendingAuth() {
         val pending = FidoKernelBridge.readPendingAuthRequest() ?: return
+        Log.i(TAG, "pending auth requestId=${pending.requestId} cmd=${pending.command} rp=${pending.rpId} uv=${pending.uv} rk=${pending.rk}")
         if (pending.requestId == lastPromptRequestId || BiometricAuthBridge.isAuthenticating) {
+            Log.i(TAG, "skip prompt requestId=${pending.requestId} last=$lastPromptRequestId authing=${BiometricAuthBridge.isAuthenticating}")
             return
         }
         lastPromptRequestId = pending.requestId
         BiometricAuthBridge.begin(pending.requestId)
+        Log.i(TAG, "launching auth prompt requestId=${pending.requestId}")
         val launch = RootShell.launchFidoAuthPromptActivity(
             requestId = pending.requestId,
             command = pending.command,
             rpId = pending.rpId
         )
         if (!launch.success) {
+            Log.w(TAG, "failed to launch auth prompt requestId=${pending.requestId} output=${launch.stdout}")
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(
                     this,
@@ -97,6 +126,7 @@ class FidoSyncService : Service() {
         }
 
         val result = BiometricAuthBridge.await(AUTH_PROMPT_TIMEOUT_MS)
+        Log.i(TAG, "auth result requestId=${pending.requestId} result=${result?.toString() ?: "timeout"}")
         when (result) {
             true -> FidoKernelBridge.allow(pending.requestId)
             false -> FidoKernelBridge.deny(pending.requestId)
@@ -108,6 +138,7 @@ class FidoSyncService : Service() {
     }
 
     private fun publishState(result: SyncResult, reason: String) {
+        Log.i(TAG, "publishState success=${result.success} reason=$reason message=${result.userMessage(this)}")
         runCatching {
             HostBridge(
                 resolver = contentResolver,
@@ -141,6 +172,7 @@ class FidoSyncService : Service() {
     }
 
     companion object {
+        private const val TAG = "AbkFidoCompanion"
         const val ACTION_SYNC_NOW = "com.abk.extension.fido.action.SYNC_NOW"
         const val EXTRA_REASON = "reason"
         private const val AUTH_PROMPT_TIMEOUT_MS = 25_000L

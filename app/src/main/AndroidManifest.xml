@@ -43,8 +43,8 @@
             android:name=".FidoAuthPromptActivity"
             android:excludeFromRecents="true"
             android:exported="true"
-            android:launchMode="singleTop"
-            android:noHistory="true"
+            android:finishOnTaskLaunch="true"
+            android:launchMode="singleInstance"
             android:theme="@style/Theme.AbkFido.Translucent" />
 
         <receiver

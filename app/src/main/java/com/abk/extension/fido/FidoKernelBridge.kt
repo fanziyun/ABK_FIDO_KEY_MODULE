@@ -1,5 +1,7 @@
 package com.abk.extension.fido
 
+import android.util.Log
+
 private const val SYSFS_BASE = "/sys/kernel/abk_fido_key"
 private const val AUTH_PENDING_PATH = "$SYSFS_BASE/auth_pending"
 private const val AUTH_REQUEST_ID_PATH = "$SYSFS_BASE/auth_request_id"
@@ -7,6 +9,7 @@ private const val AUTH_CONTEXT_PATH = "$SYSFS_BASE/auth_context"
 private const val AUTH_DECISION_PATH = "$SYSFS_BASE/auth_decision"
 private const val LAST_ERROR_PATH = "$SYSFS_BASE/last_error"
 private const val LAST_TRACE_PATH = "$SYSFS_BASE/last_trace"
+private const val TAG = "AbkFidoCompanion"
 
 internal data class PendingAuthRequest(
     val requestId: Int,
@@ -19,15 +22,27 @@ internal data class PendingAuthRequest(
 internal object FidoKernelBridge {
     fun readPendingAuthRequest(): PendingAuthRequest? {
         val pending = RootShell.readTextFile(AUTH_PENDING_PATH)
-        if (!pending.success || pending.stdout.trim() != "1") return null
+        if (!pending.success) {
+            Log.w(TAG, "read auth_pending failed exit=${pending.exitCode} out=${pending.stdout}")
+            return null
+        }
+        if (pending.stdout.trim() != "1") return null
 
         val requestId = RootShell.readTextFile(AUTH_REQUEST_ID_PATH)
-            .stdout
-            .trim()
-            .toIntOrNull()
-            ?: return null
+        if (!requestId.success) {
+            Log.w(TAG, "read auth_request_id failed exit=${requestId.exitCode} out=${requestId.stdout}")
+            return null
+        }
+        val requestIdValue = requestId.stdout.trim().toIntOrNull()
+        if (requestIdValue == null) {
+            Log.w(TAG, "parse auth_request_id failed out=${requestId.stdout}")
+            return null
+        }
         val context = RootShell.readTextFile(AUTH_CONTEXT_PATH)
-        if (!context.success) return null
+        if (!context.success) {
+            Log.w(TAG, "read auth_context failed exit=${context.exitCode} out=${context.stdout}")
+            return null
+        }
 
         val raw = context.stdout.trim()
         val values = raw
@@ -39,7 +54,7 @@ internal object FidoKernelBridge {
             .toMap()
 
         return PendingAuthRequest(
-            requestId = requestId,
+            requestId = requestIdValue,
             command = values["cmd"].orEmpty(),
             rpId = values["rp"].orEmpty(),
             uv = values["uv"] == "1",

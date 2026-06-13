@@ -51,12 +51,13 @@ internal class MetadataSyncCoordinator(context: Context) {
             val repository = StoreSnapshotRepository(localDbFile)
             repository.ensureSchema()
 
+            val kernelBlob = FidoKernelBridge.readStoreBlobBase64()
             val metadataBlob = RootShell.readFileBase64(METADATA_BLOB_PATH)
             val localBlob = repository.loadSnapshot()
 
-            if (metadataBlob.success) {
+            if (kernelBlob.success) {
                 val blob = runCatching {
-                    Base64.decode(metadataBlob.stdout, Base64.DEFAULT)
+                    Base64.decode(kernelBlob.stdout, Base64.DEFAULT)
                 }.getOrElse {
                     return SyncResult(false, notes + "kernel blob decode failed")
                 }
@@ -65,6 +66,27 @@ internal class MetadataSyncCoordinator(context: Context) {
                     notes += "captured kernel blob into sqlite"
                 } else {
                     notes += "kernel blob already mirrored"
+                }
+                val exportBlob = RootShell.writeFileBase64(
+                    path = METADATA_BLOB_PATH,
+                    payloadBase64 = Base64.encodeToString(blob, Base64.NO_WRAP)
+                )
+                if (!exportBlob.success) {
+                    notes += "kernel blob exported to sqlite only"
+                } else {
+                    notes += "exported kernel blob to /metadata"
+                }
+            } else if (metadataBlob.success) {
+                val blob = runCatching {
+                    Base64.decode(metadataBlob.stdout, Base64.DEFAULT)
+                }.getOrElse {
+                    return SyncResult(false, notes + "metadata blob decode failed")
+                }
+                if (localBlob == null || !blob.contentEquals(localBlob)) {
+                    repository.saveSnapshot(blob)
+                    notes += "captured metadata blob into sqlite"
+                } else {
+                    notes += "metadata blob already mirrored"
                 }
             } else {
                 if (localBlob != null) {

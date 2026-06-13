@@ -9,6 +9,7 @@ private const val AUTH_CONTEXT_PATH = "$SYSFS_BASE/auth_context"
 private const val AUTH_DECISION_PATH = "$SYSFS_BASE/auth_decision"
 private const val LAST_ERROR_PATH = "$SYSFS_BASE/last_error"
 private const val LAST_TRACE_PATH = "$SYSFS_BASE/last_trace"
+private const val STORE_BLOB_PATH = "$SYSFS_BASE/store_blob"
 private const val TAG = "AbkFidoCompanion"
 
 internal data class PendingAuthRequest(
@@ -73,4 +74,7 @@ internal object FidoKernelBridge {
 
     fun readLastTrace(): String =
         RootShell.readTextFile(LAST_TRACE_PATH).stdout.trim()
+
+    fun readStoreBlobBase64(): RootShell.CommandResult =
+        RootShell.readFileBase64(STORE_BLOB_PATH)
 }

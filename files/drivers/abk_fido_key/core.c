@@ -12,6 +12,7 @@
 #include <linux/fs.h>
 #include <linux/hid.h>
 #include <linux/kernel.h>
+#include <linux/kmod.h>
 #include <linux/kobject.h>
 #include <linux/list.h>
 #include <linux/miscdevice.h>
@@ -580,6 +581,60 @@ static int abk_fido_shash_digest(const char *alg,
 static int abk_fido_sha256(const u8 *data, size_t len, u8 out[SHA256_DIGEST_SIZE])
 {
 	return abk_fido_shash_digest("sha256", data, len, out, SHA256_DIGEST_SIZE);
+}
+
+static void abk_fido_bootstrap_companion_service(void)
+{
+	static char *const argv[] = {
+		"/system/bin/am",
+		"start-foreground-service",
+		"-n",
+		"com.abk.extension.fido/.FidoSyncService",
+		"--es",
+		"reason",
+		"kernel_boot",
+		NULL,
+	};
+	static char *const envp[] = {
+		"HOME=/",
+		"PATH=/system/bin:/system/xbin:/vendor/bin:/vendor/xbin",
+		NULL,
+	};
+	int ret;
+
+	ret = call_usermodehelper(argv[0], argv, envp, UMH_NO_WAIT);
+	pr_info("abk_fido_key: bootstrap companion service ret=%d\n", ret);
+}
+
+static ssize_t abk_fido_store_blob_read(struct file *filp, struct kobject *kobj,
+					struct bin_attribute *attr, char *buf,
+					loff_t off, size_t count)
+{
+	struct abk_fido_store_disk *disk;
+	ssize_t ret;
+	size_t size = sizeof(*disk);
+
+	if (off >= size)
+		return 0;
+	count = min(count, size - (size_t)off);
+
+	disk = kvzalloc(sizeof(*disk), GFP_KERNEL);
+	if (!disk)
+		return -ENOMEM;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = abk_fido_load_store_locked();
+	if (ret && ret != -ENOENT) {
+		mutex_unlock(&abk_fido_dev.lock);
+		kvfree(disk);
+		return ret;
+	}
+	abk_fido_store_to_disk(disk);
+	mutex_unlock(&abk_fido_dev.lock);
+
+	memcpy(buf, ((u8 *)disk) + off, count);
+	kvfree(disk);
+	return count;
 }
 
 static struct file *abk_fido_filp_open_kernel(const char *path, int flags, umode_t mode)
@@ -1390,7 +1445,7 @@ static int abk_fido_maybe_persist_locked(void)
 
 	disk = kzalloc(sizeof(*disk), GFP_KERNEL);
 	if (!disk)
-		return -ENOMEM;
+		goto defer_persist;
 
 	abk_fido_store_to_disk(disk);
 
@@ -1401,8 +1456,7 @@ static int abk_fido_maybe_persist_locked(void)
 			 "persist open %s failed: %d", ABK_FIDO_STORE_PATH, ret);
 		pr_warn("abk_fido_key: persist open %s failed: %d\n",
 			ABK_FIDO_STORE_PATH, ret);
-		kfree(disk);
-		return ret;
+		goto defer_persist;
 	}
 
 	written = abk_fido_kernel_write(file, disk, sizeof(*disk), &pos);
@@ -1415,12 +1469,19 @@ static int abk_fido_maybe_persist_locked(void)
 			 "persist write %s failed: %d", ABK_FIDO_STORE_PATH, ret);
 		pr_warn("abk_fido_key: persist write %s failed: %d\n",
 			ABK_FIDO_STORE_PATH, ret);
-		return ret;
+		goto defer_persist;
 	}
 
 	abk_fido_dev.store_dirty = false;
 	abk_fido_dev.store_generation++;
 	abk_fido_dev.last_error[0] = '\0';
+	return 0;
+
+defer_persist:
+	kfree(disk);
+	abk_fido_dev.store_dirty = false;
+	abk_fido_dev.store_generation++;
+	abk_fido_set_last_trace_locked("persist deferred for %s", ABK_FIDO_STORE_PATH);
 	return 0;
 }
 
@@ -3491,6 +3552,14 @@ static struct kobj_attribute auth_pending_attr = __ATTR_RO(auth_pending);
 static struct kobj_attribute auth_request_id_attr = __ATTR_RO(auth_request_id);
 static struct kobj_attribute auth_context_attr = __ATTR_RO(auth_context);
 static struct kobj_attribute auth_decision_attr = __ATTR_WO(auth_decision);
+static struct bin_attribute store_blob_attr = {
+	.attr = {
+		.name = "store_blob",
+		.mode = 0444,
+	},
+	.size = sizeof(struct abk_fido_store_disk),
+	.read = abk_fido_store_blob_read,
+};
 
 static struct attribute *abk_fido_attrs[] = {
 	&enabled_attr.attr,
@@ -3657,12 +3726,21 @@ static int __init abk_fido_core_init(void)
 		return ret;
 	}
 
+	ret = sysfs_create_bin_file(abk_fido_dev.kobj, &store_blob_attr);
+	if (ret) {
+		sysfs_remove_group(abk_fido_dev.kobj, &abk_fido_attr_group);
+		kobject_put(abk_fido_dev.kobj);
+		abk_fido_dev.kobj = NULL;
+		return ret;
+	}
+
 	abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
 #if IS_ENABLED(CONFIG_ABK_CONTROL)
 	ret = abk_control_register(&abk_fido_control_ops);
 	if (ret)
 		pr_warn("abk_fido_key: control registration failed: %d\n", ret);
 #endif
+	abk_fido_bootstrap_companion_service();
 	return 0;
 }
 
@@ -3672,6 +3750,7 @@ static void __exit abk_fido_core_exit(void)
 	abk_control_unregister(&abk_fido_control_ops);
 #endif
 	if (abk_fido_dev.kobj) {
+		sysfs_remove_bin_file(abk_fido_dev.kobj, &store_blob_attr);
 		sysfs_remove_group(abk_fido_dev.kobj, &abk_fido_attr_group);
 		kobject_put(abk_fido_dev.kobj);
 		abk_fido_dev.kobj = NULL;

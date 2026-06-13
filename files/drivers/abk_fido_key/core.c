@@ -1695,13 +1695,35 @@ static int abk_fido_make_authdata_attested(struct abk_fido_credential *cred,
 	return 0;
 }
 
-static int abk_fido_make_authdata_assert(struct abk_fido_credential *cred,
+static int abk_fido_make_authdata_assert(const char *rp_id,
 					 u8 flags, u32 sign_count,
 					 u8 *out, size_t *out_len)
 {
-	abk_fido_authdata_common(cred->rp_id, flags, sign_count, out);
+	abk_fido_authdata_common(rp_id, flags, sign_count, out);
 	*out_len = 37;
 	return 0;
+}
+
+static bool abk_fido_rp_matches_request(const char *stored_rp, const char *requested_rp)
+{
+	const char *host;
+	size_t host_len;
+	const char *slash;
+
+	if (!strcmp(stored_rp, requested_rp))
+		return true;
+
+	if (strncmp(requested_rp, "https://", 8))
+		return false;
+
+	host = requested_rp + 8;
+	slash = strchr(host, '/');
+	host_len = slash ? (size_t)(slash - host) : strlen(host);
+	if (!host_len)
+		return false;
+
+	return strlen(stored_rp) == host_len &&
+	       !strncmp(stored_rp, host, host_len);
 }
 
 static int abk_fido_credential_matches_allow(struct abk_fido_get_assert_req *req,
@@ -2104,7 +2126,7 @@ static int abk_fido_find_rp_credential_locked(struct abk_fido_get_assert_req *re
 
 		if (!cred->in_use)
 			continue;
-		if (strcmp(cred->rp_id, req->rp_id))
+		if (!abk_fido_rp_matches_request(cred->rp_id, req->rp_id))
 			continue;
 		if (!abk_fido_credential_matches_allow(req, cred))
 			continue;
@@ -2294,7 +2316,7 @@ static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_as
 		flags |= ABK_FIDO_CRED_FLAG_UV;
 	include_user = req->allow_count == 0;
 
-	ret = abk_fido_make_authdata_assert(cred, flags,
+	ret = abk_fido_make_authdata_assert(req->rp_id, flags,
 					    sign_count, auth_data, &auth_data_len);
 	if (ret)
 		goto out_unlock;

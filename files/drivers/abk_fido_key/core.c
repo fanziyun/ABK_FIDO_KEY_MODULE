@@ -847,7 +847,7 @@ static int abk_fido_ecdsa_sign_p256(const u8 priv_bytes[32], const u8 hash_bytes
 		if (ret)
 			continue;
 
-		memcpy(r, pub, ndigits * sizeof(u64));
+		abk_fido_digits_from_bytes((const u8 *)pub, 32, r, ndigits);
 		while (vli_cmp(r, curve->n, ndigits) >= 0)
 			vli_sub(r, r, curve->n, ndigits);
 		if (vli_is_zero(r, ndigits))
@@ -858,7 +858,7 @@ static int abk_fido_ecdsa_sign_p256(const u8 priv_bytes[32], const u8 hash_bytes
 		if (vli_is_zero(sum, ndigits))
 			continue;
 
-		memcpy(k_int, k, ndigits * sizeof(u64));
+		abk_fido_digits_from_bytes((const u8 *)k, 32, k_int, ndigits);
 		vli_mod_inv(kinv, k_int, curve->n, ndigits);
 		vli_mod_mult_slow(s, kinv, sum, curve->n, ndigits);
 		if (!vli_is_zero(s, ndigits))

@@ -1,7 +1,9 @@
 <resources>
-    <style name="Theme.AbkFido.Translucent" parent="Theme.AppCompat.Translucent.NoTitleBar">
+    <style name="Theme.AbkFido.Translucent" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:backgroundDimEnabled">false</item>
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
     </style>
 </resources>

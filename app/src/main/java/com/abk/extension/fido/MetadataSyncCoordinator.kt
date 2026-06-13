@@ -51,11 +51,12 @@ internal class MetadataSyncCoordinator(context: Context) {
             val repository = StoreSnapshotRepository(localDbFile)
             repository.ensureSchema()
 
+            val kernelCredentialCount = FidoKernelBridge.readCredentialCount() ?: 0
             val kernelBlob = FidoKernelBridge.readStoreBlobBase64()
             val metadataBlob = RootShell.readFileBase64(METADATA_BLOB_PATH)
             val localBlob = repository.loadSnapshot()
 
-            if (kernelBlob.success) {
+            if (kernelBlob.success && kernelCredentialCount > 0) {
                 val blob = runCatching {
                     Base64.decode(kernelBlob.stdout, Base64.DEFAULT)
                 }.getOrElse {
@@ -76,6 +77,24 @@ internal class MetadataSyncCoordinator(context: Context) {
                 } else {
                     notes += "exported kernel blob to /metadata"
                 }
+            } else if (kernelCredentialCount == 0 && localBlob != null) {
+                val restoreKernel = FidoKernelBridge.writeStoreBlobBase64(
+                    Base64.encodeToString(localBlob, Base64.NO_WRAP)
+                )
+                if (restoreKernel.success) {
+                    FidoKernelBridge.reloadStore()
+                    notes += "restored kernel blob from sqlite"
+                } else {
+                    notes += "kernel blob restore via sysfs failed"
+                }
+                val exportBlob = RootShell.writeFileBase64(
+                    path = METADATA_BLOB_PATH,
+                    payloadBase64 = Base64.encodeToString(localBlob, Base64.NO_WRAP)
+                )
+                if (!exportBlob.success) {
+                    return SyncResult(false, notes + "failed to restore kernel blob to /metadata")
+                }
+                notes += "restored metadata blob from sqlite"
             } else if (metadataBlob.success) {
                 val blob = runCatching {
                     Base64.decode(metadataBlob.stdout, Base64.DEFAULT)

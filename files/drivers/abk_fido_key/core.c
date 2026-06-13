@@ -643,6 +643,38 @@ static ssize_t abk_fido_store_blob_read(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
+static ssize_t abk_fido_store_blob_write(struct file *filp, struct kobject *kobj,
+					 struct bin_attribute *attr, char *buf,
+					 loff_t off, size_t count)
+{
+	struct abk_fido_store_disk *disk;
+	size_t size = sizeof(*disk);
+	int ret;
+
+	if (off != 0 || count != size)
+		return -EINVAL;
+
+	disk = kvzalloc(sizeof(*disk), GFP_KERNEL);
+	if (!disk)
+		return -ENOMEM;
+
+	memcpy(disk, buf, size);
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = abk_fido_store_from_disk(disk);
+	if (!ret) {
+		abk_fido_dev.store_loaded = true;
+		abk_fido_dev.store_dirty = false;
+		abk_fido_dev.store_generation++;
+		abk_fido_set_last_trace_locked("store blob restored from userspace");
+		pr_info("abk_fido_key: store blob restored from userspace\n");
+	}
+	mutex_unlock(&abk_fido_dev.lock);
+
+	kvfree(disk);
+	return ret ? ret : count;
+}
+
 static struct file *abk_fido_filp_open_kernel(const char *path, int flags, umode_t mode)
 {
 	const struct cred *old;
@@ -3614,10 +3646,11 @@ static struct kobj_attribute auth_decision_attr = __ATTR_WO(auth_decision);
 static struct bin_attribute store_blob_attr = {
 	.attr = {
 		.name = "store_blob",
-		.mode = 0444,
+		.mode = 0600,
 	},
 	.size = sizeof(struct abk_fido_store_disk),
 	.read = abk_fido_store_blob_read,
+	.write = abk_fido_store_blob_write,
 };
 
 static struct attribute *abk_fido_attrs[] = {

@@ -761,7 +761,7 @@ static void abk_fido_digits_to_bytes(const u64 *digits, unsigned int ndigits,
 
 static void abk_fido_p256_scalar_to_bytes(const u64 *digits, u8 out[32])
 {
-	abk_fido_digits_to_bytes(digits, ECC_CURVE_NIST_P256_DIGITS, out, 32);
+	memcpy(out, digits, 32);
 }
 
 static void abk_fido_p256_scalar_from_bytes(const u8 bytes[32], u64 *digits)

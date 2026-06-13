@@ -1464,7 +1464,6 @@ static int abk_fido_maybe_persist_locked(void)
 
 	written = abk_fido_kernel_write(file, disk, sizeof(*disk), &pos);
 	filp_close(file, NULL);
-	kfree(disk);
 
 	if (written != sizeof(struct abk_fido_store_disk)) {
 		ret = written < 0 ? (int)written : -EIO;
@@ -1478,6 +1477,7 @@ static int abk_fido_maybe_persist_locked(void)
 	abk_fido_dev.store_dirty = false;
 	abk_fido_dev.store_generation++;
 	abk_fido_dev.last_error[0] = '\0';
+	kfree(disk);
 	return 0;
 
 defer_persist:
@@ -1485,6 +1485,7 @@ defer_persist:
 	abk_fido_dev.store_dirty = false;
 	abk_fido_dev.store_generation++;
 	abk_fido_set_last_trace_locked("persist deferred for %s", ABK_FIDO_STORE_PATH);
+	pr_info("abk_fido_key: persist deferred for %s\n", ABK_FIDO_STORE_PATH);
 	return 0;
 }
 
@@ -1540,6 +1541,7 @@ static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, b
 	pr_info("abk_fido_key: auth pending req=%u cmd=%s rp=%s uv=%u rk=%u\n",
 		request_id, abk_fido_ctap_name(ctap_cmd), rp_id, uv, rk);
 	mutex_unlock(&abk_fido_dev.lock);
+	abk_fido_bootstrap_companion_service();
 	wake_up_interruptible(&abk_fido_dev.auth_wait);
 	wait_ret = wait_event_interruptible_timeout(
 		abk_fido_dev.auth_wait,

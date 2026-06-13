@@ -25,6 +25,8 @@ class FidoSyncService : Service() {
     private var lastSyncReason = "service_start"
     @Volatile
     private var lastPromptRequestId = -1
+    @Volatile
+    private var lastObservedStoreGeneration = -1
     private val syncStateLock = Any()
 
     override fun onCreate() {
@@ -63,6 +65,12 @@ class FidoSyncService : Service() {
                 Log.w("AbkFidoCompanion", "auth loop failed", it)
             }
 
+            runCatching {
+                maybeScheduleStoreSync()
+            }.onFailure {
+                Log.w(TAG, "store generation poll failed", it)
+            }
+
             kickSyncIfNeeded()
 
             try {
@@ -71,6 +79,23 @@ class FidoSyncService : Service() {
                 break
             }
         }
+    }
+
+    private fun maybeScheduleStoreSync() {
+        val generation = FidoKernelBridge.readStoreGeneration() ?: return
+        if (lastObservedStoreGeneration == -1) {
+            lastObservedStoreGeneration = generation
+            return
+        }
+        if (generation == lastObservedStoreGeneration) {
+            return
+        }
+        lastObservedStoreGeneration = generation
+        synchronized(syncStateLock) {
+            syncRequested = true
+            lastSyncReason = "store_generation_$generation"
+        }
+        Log.i(TAG, "detected store generation change=$generation")
     }
 
     private fun kickSyncIfNeeded() {

@@ -59,6 +59,7 @@
 #define ABK_FIDO_MAX_CREDS			32
 #define ABK_FIDO_MAX_CBOR			1536
 #define ABK_FIDO_MAX_SIG_DER			80
+#define ABK_FIDO_AUTH_CACHE_MS			10000
 #define ABK_FIDO_STORE_PATH			"/metadata/abk_fido_store.bin"
 #define ABK_FIDO_STORE_MAGIC			0x41424646
 #define ABK_FIDO_STORE_VERSION			1
@@ -298,6 +299,10 @@ struct abk_fido_device {
 	bool auth_pending_uv;
 	bool auth_pending_rk;
 	char auth_pending_rp_id[ABK_FIDO_MAX_RP_ID];
+	bool auth_cache_valid;
+	u8 auth_cache_ctap_cmd;
+	unsigned long auth_cache_expires;
+	char auth_cache_rp_id[ABK_FIDO_MAX_RP_ID];
 	u8 pin_agreement_priv[32];
 	u8 pin_agreement_pub[64];
 	bool pin_agreement_valid;
@@ -1521,6 +1526,17 @@ static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, b
 
 	if (!abk_fido_dev.auth_gate_enabled)
 		return 0;
+	if (abk_fido_dev.auth_cache_valid &&
+	    time_before(jiffies, abk_fido_dev.auth_cache_expires) &&
+	    abk_fido_dev.auth_cache_ctap_cmd == ctap_cmd &&
+	    !strcmp(abk_fido_dev.auth_cache_rp_id, rp_id)) {
+		abk_fido_set_last_trace_locked(
+			"auth cache hit cmd=%s rp=%s",
+			abk_fido_ctap_name(ctap_cmd), rp_id);
+		pr_info("abk_fido_key: auth cache hit cmd=%s rp=%s\n",
+			abk_fido_ctap_name(ctap_cmd), rp_id);
+		return 0;
+	}
 
 	request_id = ++abk_fido_dev.auth_request_id;
 	abk_fido_dev.auth_pending = true;
@@ -1583,6 +1599,11 @@ static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, b
 	abk_fido_set_last_trace_locked(
 		"auth allowed req=%u cmd=%s", request_id,
 		abk_fido_ctap_name(ctap_cmd));
+	abk_fido_dev.auth_cache_valid = true;
+	abk_fido_dev.auth_cache_ctap_cmd = ctap_cmd;
+	abk_fido_dev.auth_cache_expires = jiffies + msecs_to_jiffies(ABK_FIDO_AUTH_CACHE_MS);
+	strscpy(abk_fido_dev.auth_cache_rp_id, rp_id,
+		sizeof(abk_fido_dev.auth_cache_rp_id));
 	pr_info("abk_fido_key: auth allowed req=%u cmd=%s\n",
 		request_id, abk_fido_ctap_name(ctap_cmd));
 	return 0;
@@ -1597,6 +1618,8 @@ static int abk_fido_auth_decide_locked(bool allow, u32 request_id, bool check_id
 
 	abk_fido_dev.auth_allowed = allow;
 	abk_fido_dev.auth_decided = true;
+	if (!allow)
+		abk_fido_dev.auth_cache_valid = false;
 	wake_up_interruptible(&abk_fido_dev.auth_wait);
 	return 0;
 }

@@ -8,6 +8,9 @@ import java.io.File
 private const val LOCAL_DB_NAME = "abk_fido.db"
 private const val METADATA_DB_PATH = "/metadata/abk_fido.db"
 private const val METADATA_BLOB_PATH = "/metadata/abk_fido_store.bin"
+private const val STORE_DISK_HEADER_SIZE = 60
+private const val STORE_DISK_CRED_SIZE = 356
+private const val STORE_DISK_MAX_CREDS = 32
 private val syncLock = Any()
 
 data class SyncResult(
@@ -55,31 +58,45 @@ internal class MetadataSyncCoordinator(context: Context) {
             val kernelBlob = FidoKernelBridge.readStoreBlobBase64()
             val metadataBlob = RootShell.readFileBase64(METADATA_BLOB_PATH)
             val localBlob = repository.loadSnapshot()
+            val kernelBlobBytes = if (kernelBlob.success) {
+                runCatching { Base64.decode(kernelBlob.stdout, Base64.DEFAULT) }.getOrNull()
+            } else {
+                null
+            }
+            val metadataBlobBytes = if (metadataBlob.success) {
+                runCatching { Base64.decode(metadataBlob.stdout, Base64.DEFAULT) }.getOrNull()
+            } else {
+                null
+            }
+            val mergedLocalBlob = mergeStoreSnapshots(
+                preferred = localBlob,
+                fallback = metadataBlobBytes
+            )
+            if (mergedLocalBlob != null && (localBlob == null || !mergedLocalBlob.contentEquals(localBlob))) {
+                repository.saveSnapshot(mergedLocalBlob)
+                notes += "merged sqlite snapshot with metadata blob"
+            }
+            val effectiveLocalBlob = mergedLocalBlob ?: localBlob
 
-            if (kernelBlob.success && kernelCredentialCount > 0) {
-                val blob = runCatching {
-                    Base64.decode(kernelBlob.stdout, Base64.DEFAULT)
-                }.getOrElse {
-                    return SyncResult(false, notes + "kernel blob decode failed")
-                }
-                if (localBlob == null || !blob.contentEquals(localBlob)) {
-                    repository.saveSnapshot(blob)
+            if (kernelBlobBytes != null && kernelCredentialCount > 0) {
+                if (effectiveLocalBlob == null || !kernelBlobBytes.contentEquals(effectiveLocalBlob)) {
+                    repository.saveSnapshot(kernelBlobBytes)
                     notes += "captured kernel blob into sqlite"
                 } else {
                     notes += "kernel blob already mirrored"
                 }
                 val exportBlob = RootShell.writeFileBase64(
                     path = METADATA_BLOB_PATH,
-                    payloadBase64 = Base64.encodeToString(blob, Base64.NO_WRAP)
+                    payloadBase64 = Base64.encodeToString(kernelBlobBytes, Base64.NO_WRAP)
                 )
                 if (!exportBlob.success) {
                     notes += "kernel blob exported to sqlite only"
                 } else {
                     notes += "exported kernel blob to /metadata"
                 }
-            } else if (kernelCredentialCount == 0 && localBlob != null) {
+            } else if (effectiveLocalBlob != null) {
                 val restoreKernel = FidoKernelBridge.writeStoreBlobBase64(
-                    Base64.encodeToString(localBlob, Base64.NO_WRAP)
+                    Base64.encodeToString(effectiveLocalBlob, Base64.NO_WRAP)
                 )
                 if (restoreKernel.success) {
                     FidoKernelBridge.reloadStore()
@@ -89,37 +106,21 @@ internal class MetadataSyncCoordinator(context: Context) {
                 }
                 val exportBlob = RootShell.writeFileBase64(
                     path = METADATA_BLOB_PATH,
-                    payloadBase64 = Base64.encodeToString(localBlob, Base64.NO_WRAP)
+                    payloadBase64 = Base64.encodeToString(effectiveLocalBlob, Base64.NO_WRAP)
                 )
                 if (!exportBlob.success) {
                     return SyncResult(false, notes + "failed to restore kernel blob to /metadata")
                 }
                 notes += "restored metadata blob from sqlite"
-            } else if (metadataBlob.success) {
-                val blob = runCatching {
-                    Base64.decode(metadataBlob.stdout, Base64.DEFAULT)
-                }.getOrElse {
-                    return SyncResult(false, notes + "metadata blob decode failed")
-                }
-                if (localBlob == null || !blob.contentEquals(localBlob)) {
-                    repository.saveSnapshot(blob)
+            } else if (metadataBlobBytes != null) {
+                if (effectiveLocalBlob == null || !metadataBlobBytes.contentEquals(effectiveLocalBlob)) {
+                    repository.saveSnapshot(metadataBlobBytes)
                     notes += "captured metadata blob into sqlite"
                 } else {
                     notes += "metadata blob already mirrored"
                 }
             } else {
-                if (localBlob != null) {
-                    val exportBlob = RootShell.writeFileBase64(
-                        path = METADATA_BLOB_PATH,
-                        payloadBase64 = Base64.encodeToString(localBlob, Base64.NO_WRAP)
-                    )
-                    if (!exportBlob.success) {
-                        return SyncResult(false, notes + "failed to restore kernel blob to /metadata")
-                    }
-                    notes += "restored kernel blob from sqlite"
-                } else {
-                    notes += "kernel blob not found"
-                }
+                notes += "kernel blob not found"
             }
 
             val exportDb = RootShell.copyFileToMetadata(localDbFile.absolutePath, METADATA_DB_PATH)
@@ -130,6 +131,32 @@ internal class MetadataSyncCoordinator(context: Context) {
             return SyncResult(true, notes)
         }
     }
+}
+
+private fun mergeStoreSnapshots(preferred: ByteArray?, fallback: ByteArray?): ByteArray? {
+    val leftCount = preferred?.storeCredentialCount() ?: -1
+    val rightCount = fallback?.storeCredentialCount() ?: -1
+    return when {
+        preferred == null -> fallback
+        fallback == null -> preferred
+        rightCount > leftCount -> fallback
+        else -> preferred
+    }
+}
+
+private fun ByteArray.storeCredentialCount(): Int {
+    if (size < STORE_DISK_HEADER_SIZE) return -1
+    val credsBytes = size - STORE_DISK_HEADER_SIZE
+    if (credsBytes <= 0) return 0
+    val slots = minOf(credsBytes / STORE_DISK_CRED_SIZE, STORE_DISK_MAX_CREDS)
+    var count = 0
+    for (i in 0 until slots) {
+        val offset = STORE_DISK_HEADER_SIZE + (i * STORE_DISK_CRED_SIZE)
+        if (getOrNull(offset)?.toInt() == 1) {
+            count++
+        }
+    }
+    return count
 }
 
 private class StoreSnapshotRepository(private val dbFile: File) {

@@ -1940,6 +1940,8 @@ static int abk_fido_parse_make_cred(const u8 *buf, size_t len,
 					return -EINVAL;
 				if (abk_fido_slice_eq_text(text, "rk"))
 					req->rk = value;
+				else if (abk_fido_slice_eq_text(text, "uv"))
+					req->uv = value;
 			}
 			break;
 		}
@@ -2035,6 +2037,22 @@ static int abk_fido_parse_get_assert(const u8 *buf, size_t len,
 					}
 				}
 				req->allow_count++;
+			}
+			break;
+		}
+		case 5: {
+			u64 opt_count, j;
+
+			if (abk_cbor_read_map(&r, &opt_count))
+				return -EINVAL;
+			for (j = 0; j < opt_count; j++) {
+				struct abk_fido_slice text;
+				bool value;
+
+				if (abk_cbor_read_text(&r, &text) || abk_cbor_read_bool(&r, &value))
+					return -EINVAL;
+				if (abk_fido_slice_eq_text(text, "uv"))
+					req->uv = value;
 			}
 			break;
 		}

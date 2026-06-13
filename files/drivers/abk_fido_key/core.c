@@ -19,6 +19,7 @@
 #include <linux/mount.h>
 #include <linux/mutex.h>
 #include <linux/crypto.h>
+#include <linux/cred.h>
 #include <linux/idr.h>
 #include <linux/namei.h>
 #include <linux/poll.h>
@@ -579,6 +580,54 @@ static int abk_fido_shash_digest(const char *alg,
 static int abk_fido_sha256(const u8 *data, size_t len, u8 out[SHA256_DIGEST_SIZE])
 {
 	return abk_fido_shash_digest("sha256", data, len, out, SHA256_DIGEST_SIZE);
+}
+
+static struct file *abk_fido_filp_open_kernel(const char *path, int flags, umode_t mode)
+{
+	const struct cred *old;
+	struct cred *cred;
+	struct file *file;
+
+	cred = prepare_kernel_cred(NULL);
+	if (!cred)
+		return ERR_PTR(-ENOMEM);
+
+	old = override_creds(cred);
+	file = filp_open(path, flags, mode);
+	revert_creds(old);
+	return file;
+}
+
+static ssize_t abk_fido_kernel_read(struct file *file, void *buf, size_t len, loff_t *pos)
+{
+	const struct cred *old;
+	struct cred *cred;
+	ssize_t ret;
+
+	cred = prepare_kernel_cred(NULL);
+	if (!cred)
+		return -ENOMEM;
+
+	old = override_creds(cred);
+	ret = kernel_read(file, buf, len, pos);
+	revert_creds(old);
+	return ret;
+}
+
+static ssize_t abk_fido_kernel_write(struct file *file, const void *buf, size_t len, loff_t *pos)
+{
+	const struct cred *old;
+	struct cred *cred;
+	ssize_t ret;
+
+	cred = prepare_kernel_cred(NULL);
+	if (!cred)
+		return -ENOMEM;
+
+	old = override_creds(cred);
+	ret = kernel_write(file, buf, len, pos);
+	revert_creds(old);
+	return ret;
 }
 
 static int abk_fido_aes256_cbc(bool encrypt, const u8 key[32], u8 *buf, size_t len)
@@ -1276,7 +1325,7 @@ static int abk_fido_load_store_locked(void)
 		return abk_fido_init_new_store_locked();
 	}
 
-	file = filp_open(ABK_FIDO_STORE_PATH, O_RDONLY, 0);
+	file = abk_fido_filp_open_kernel(ABK_FIDO_STORE_PATH, O_RDONLY, 0);
 	if (IS_ERR(file)) {
 		abk_fido_dev.store_loaded = true;
 		return abk_fido_init_new_store_locked();
@@ -1288,7 +1337,7 @@ static int abk_fido_load_store_locked(void)
 		return -ENOMEM;
 	}
 
-	ret = kernel_read(file, disk, sizeof(*disk), &pos);
+	ret = abk_fido_kernel_read(file, disk, sizeof(*disk), &pos);
 	filp_close(file, NULL);
 	if (ret != sizeof(*disk)) {
 		kfree(disk);
@@ -1345,16 +1394,18 @@ static int abk_fido_maybe_persist_locked(void)
 
 	abk_fido_store_to_disk(disk);
 
-	file = filp_open(ABK_FIDO_STORE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	file = abk_fido_filp_open_kernel(ABK_FIDO_STORE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	if (IS_ERR(file)) {
 		ret = PTR_ERR(file);
 		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
 			 "persist open %s failed: %d", ABK_FIDO_STORE_PATH, ret);
+		pr_warn("abk_fido_key: persist open %s failed: %d\n",
+			ABK_FIDO_STORE_PATH, ret);
 		kfree(disk);
 		return ret;
 	}
 
-	written = kernel_write(file, disk, sizeof(*disk), &pos);
+	written = abk_fido_kernel_write(file, disk, sizeof(*disk), &pos);
 	filp_close(file, NULL);
 	kfree(disk);
 
@@ -1362,6 +1413,8 @@ static int abk_fido_maybe_persist_locked(void)
 		ret = written < 0 ? (int)written : -EIO;
 		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
 			 "persist write %s failed: %d", ABK_FIDO_STORE_PATH, ret);
+		pr_warn("abk_fido_key: persist write %s failed: %d\n",
+			ABK_FIDO_STORE_PATH, ret);
 		return ret;
 	}
 

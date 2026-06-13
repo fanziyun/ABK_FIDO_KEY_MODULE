@@ -460,6 +460,8 @@ static struct usb_gadget_strings *abk_fido_func_strings[] = {
 	NULL,
 };
 
+static void abk_fido_set_last_trace_locked(const char *fmt, ...);
+static int abk_fido_store_from_disk(struct abk_fido_store_disk *disk);
 static void abk_fido_store_to_disk(struct abk_fido_store_disk *disk);
 static int abk_fido_load_store_locked(void);
 

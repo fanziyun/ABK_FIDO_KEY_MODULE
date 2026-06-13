@@ -7,6 +7,7 @@ import android.os.Build
 
 class SyncTriggerReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
+        FidoKeepAliveJobService.schedule(context)
         val serviceIntent = Intent(context, FidoSyncService::class.java).apply {
             action = FidoSyncService.ACTION_SYNC_NOW
             putExtra(FidoSyncService.EXTRA_REASON, intent?.action ?: "broadcast")

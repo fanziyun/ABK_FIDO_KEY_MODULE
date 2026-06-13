@@ -3,7 +3,10 @@ package com.abk.extension.fido
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.util.Base64
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.io.File
+import kotlin.math.min
 
 private const val LOCAL_DB_NAME = "abk_fido.db"
 private const val METADATA_DB_PATH = "/metadata/abk_fido.db"
@@ -134,13 +137,12 @@ internal class MetadataSyncCoordinator(context: Context) {
 }
 
 private fun mergeStoreSnapshots(preferred: ByteArray?, fallback: ByteArray?): ByteArray? {
-    val leftCount = preferred?.storeCredentialCount() ?: -1
-    val rightCount = fallback?.storeCredentialCount() ?: -1
+    val left = preferred?.let(StoreDiskSnapshot::parse)
+    val right = fallback?.let(StoreDiskSnapshot::parse)
     return when {
-        preferred == null -> fallback
-        fallback == null -> preferred
-        rightCount > leftCount -> fallback
-        else -> preferred
+        left == null -> fallback
+        right == null -> preferred
+        else -> left.merge(right).encode()
     }
 }
 
@@ -158,6 +160,110 @@ private fun ByteArray.storeCredentialCount(): Int {
     }
     return count
 }
+
+private data class StoreDiskSnapshot(
+    val raw: ByteArray,
+    val signCount: Int,
+    val aaguid: ByteArray,
+    val pinSet: Byte,
+    val pinRetries: Byte,
+    val pinHash: ByteArray,
+    val pinToken: ByteArray,
+    val creds: MutableList<CredSlot>
+) {
+    data class CredSlot(
+        val index: Int,
+        val blob: ByteArray,
+        val credId: ByteArray,
+        val rpId: String,
+        val inUse: Boolean
+    )
+
+    fun merge(other: StoreDiskSnapshot): StoreDiskSnapshot {
+        val mergedCreds = linkedMapOf<String, CredSlot>()
+        (creds + other.creds)
+            .filter { it.inUse }
+            .forEach { slot ->
+                mergedCreds.putIfAbsent(slot.key(), slot)
+            }
+
+        val encoded = raw.copyOf()
+        var cursor = STORE_DISK_HEADER_SIZE
+        repeat(STORE_DISK_MAX_CREDS) { slotIndex ->
+            val slot = mergedCreds.values.elementAtOrNull(slotIndex)
+            val slotBytes = slot?.blob ?: ByteArray(STORE_DISK_CRED_SIZE)
+            System.arraycopy(slotBytes, 0, encoded, cursor, min(slotBytes.size, STORE_DISK_CRED_SIZE))
+            cursor += STORE_DISK_CRED_SIZE
+        }
+
+        val newer = if (other.signCount >= signCount) other else this
+        return copy(
+            raw = encoded,
+            signCount = newer.signCount,
+            aaguid = newer.aaguid,
+            pinSet = newer.pinSet,
+            pinRetries = newer.pinRetries,
+            pinHash = newer.pinHash,
+            pinToken = newer.pinToken,
+            creds = mergedCreds.values.toMutableList()
+        )
+    }
+
+    fun encode(): ByteArray {
+        val out = raw.copyOf()
+        val buffer = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.putInt(12, signCount)
+        System.arraycopy(aaguid, 0, out, 16, 16)
+        out[32] = pinSet
+        out[33] = pinRetries
+        System.arraycopy(pinHash, 0, out, 36, 16)
+        System.arraycopy(pinToken, 0, out, 52, 32)
+        var cursor = STORE_DISK_HEADER_SIZE
+        repeat(STORE_DISK_MAX_CREDS) { slotIndex ->
+            val slot = creds.elementAtOrNull(slotIndex)
+            val slotBytes = slot?.blob ?: ByteArray(STORE_DISK_CRED_SIZE)
+            System.arraycopy(slotBytes, 0, out, cursor, min(slotBytes.size, STORE_DISK_CRED_SIZE))
+            cursor += STORE_DISK_CRED_SIZE
+        }
+        return out
+    }
+
+    companion object {
+        fun parse(bytes: ByteArray): StoreDiskSnapshot? {
+            if (bytes.size < STORE_DISK_HEADER_SIZE) return null
+            val signCount = ByteBuffer.wrap(bytes, 12, 4).order(ByteOrder.LITTLE_ENDIAN).int
+            val aaguid = bytes.copyOfRange(16, 32)
+            val pinSet = bytes[32]
+            val pinRetries = bytes[33]
+            val pinHash = bytes.copyOfRange(36, 52)
+            val pinToken = bytes.copyOfRange(52, 84)
+            val creds = mutableListOf<CredSlot>()
+            var cursor = STORE_DISK_HEADER_SIZE
+            repeat(min((bytes.size - STORE_DISK_HEADER_SIZE) / STORE_DISK_CRED_SIZE, STORE_DISK_MAX_CREDS)) { index ->
+                val blob = bytes.copyOfRange(cursor, cursor + STORE_DISK_CRED_SIZE)
+                val inUse = blob[0].toInt() == 1
+                val credId = blob.copyOfRange(4, 36)
+                val rpIdBytes = blob.copyOfRange(100, 228)
+                val rpId = rpIdBytes.takeWhile { it != 0.toByte() }.toByteArray().toString(Charsets.UTF_8)
+                creds += CredSlot(index, blob, credId, rpId, inUse)
+                cursor += STORE_DISK_CRED_SIZE
+            }
+            return StoreDiskSnapshot(
+                raw = bytes.copyOf(),
+                signCount = signCount,
+                aaguid = aaguid,
+                pinSet = pinSet,
+                pinRetries = pinRetries,
+                pinHash = pinHash,
+                pinToken = pinToken,
+                creds = creds
+            )
+        }
+    }
+}
+
+private fun StoreDiskSnapshot.CredSlot.key(): String =
+    credId.joinToString("") { "%02x".format(it) } + "#" + rpId
 
 private class StoreSnapshotRepository(private val dbFile: File) {
     fun ensureSchema() {

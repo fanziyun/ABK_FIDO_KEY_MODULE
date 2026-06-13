@@ -12,7 +12,10 @@ import android.util.Log
 class FidoInitProvider : ContentProvider() {
     override fun onCreate(): Boolean {
         Log.i(TAG, "provider init")
-        context?.let(::startSyncService)
+        context?.let {
+            FidoKeepAliveJobService.schedule(it)
+            startSyncService(it)
+        }
         return true
     }
 

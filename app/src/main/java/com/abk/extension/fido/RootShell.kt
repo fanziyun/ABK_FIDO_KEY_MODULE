@@ -95,6 +95,21 @@ internal object RootShell {
         )
     }
 
+    fun launchFidoAuthPromptActivity(
+        requestId: Int,
+        command: String,
+        rpId: String,
+    ): CommandResult {
+        return run(
+            """
+            am start -n 'com.abk.extension.fido/.FidoAuthPromptActivity' \
+              --ei 'request_id' ${requestId} \
+              --es 'command' ${shellQuote(command)} \
+              --es 'rp_id' ${shellQuote(rpId)}
+            """.trimIndent()
+        )
+    }
+
     fun run(script: String): CommandResult {
         val process = try {
             ProcessBuilder("su", "-c", script)

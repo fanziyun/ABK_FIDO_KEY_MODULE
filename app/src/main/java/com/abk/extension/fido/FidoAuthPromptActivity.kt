@@ -8,17 +8,15 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
-import kotlin.concurrent.thread
 
 class FidoAuthPromptActivity : FragmentActivity() {
     private var requestId: Int = -1
+    private var isResultSent = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        active = true
-
         requestId = intent.getIntExtra(EXTRA_REQUEST_ID, -1)
-        if (requestId <= 0) {
+        if (requestId <= 0 || requestId != BiometricAuthBridge.expectedRequestId) {
             finish()
             return
         }
@@ -27,9 +25,13 @@ class FidoAuthPromptActivity : FragmentActivity() {
         val command = intent.getStringExtra(EXTRA_COMMAND).orEmpty()
 
         val biometricManager = BiometricManager.from(this)
-        val canAuth = biometricManager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+        val authenticators =
+            BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        val canAuth = biometricManager.canAuthenticate(authenticators)
         if (canAuth != BiometricManager.BIOMETRIC_SUCCESS) {
-            denyWithToast(getString(R.string.auth_biometric_unavailable))
+            sendResultAndFinish(false, getString(R.string.auth_biometric_unavailable))
             return
         }
 
@@ -38,11 +40,12 @@ class FidoAuthPromptActivity : FragmentActivity() {
             ContextCompat.getMainExecutor(this),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    approveAndFinish()
+                    sendResultAndFinish(true, null)
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    denyWithToast(
+                    sendResultAndFinish(
+                        false,
                         if (errString.isNotBlank()) errString.toString()
                         else getString(R.string.auth_biometric_denied)
                     )
@@ -54,44 +57,31 @@ class FidoAuthPromptActivity : FragmentActivity() {
             .setTitle(getString(R.string.auth_prompt_title))
             .setSubtitle(getString(R.string.auth_prompt_subtitle, rpId.ifBlank { command }))
             .setConfirmationRequired(false)
-            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+            .setAllowedAuthenticators(authenticators)
             .build()
         prompt.authenticate(promptInfo)
     }
 
     override fun onDestroy() {
-        active = false
         super.onDestroy()
+        sendResultAndFinish(false, null)
     }
 
-    private fun approveAndFinish() {
-        thread(name = "abk-fido-auth-allow") {
-            FidoKernelBridge.allow(requestId)
-            finishOnUiThread()
+    private fun sendResultAndFinish(success: Boolean, message: String?) {
+        if (isResultSent) return
+        isResultSent = true
+        if (!message.isNullOrBlank()) {
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            }
         }
-    }
-
-    private fun denyWithToast(message: String) {
-        Handler(Looper.getMainLooper()).post {
-            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-        }
-        thread(name = "abk-fido-auth-deny") {
-            FidoKernelBridge.deny(requestId)
-            finishOnUiThread()
-        }
-    }
-
-    private fun finishOnUiThread() {
-        Handler(Looper.getMainLooper()).post { finish() }
+        BiometricAuthBridge.finish(success)
+        finish()
     }
 
     companion object {
         const val EXTRA_REQUEST_ID = "request_id"
         const val EXTRA_COMMAND = "command"
         const val EXTRA_RP_ID = "rp_id"
-
-        @Volatile
-        var active: Boolean = false
-            private set
     }
 }

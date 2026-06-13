@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.AbkFido.Translucent" parent="Theme.AppCompat.Translucent.NoTitleBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>

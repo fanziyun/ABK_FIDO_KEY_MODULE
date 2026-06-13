@@ -42,10 +42,10 @@
         <activity
             android:name=".FidoAuthPromptActivity"
             android:excludeFromRecents="true"
-            android:exported="false"
-            android:launchMode="singleTask"
+            android:exported="true"
+            android:launchMode="singleTop"
             android:noHistory="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+            android:theme="@style/Theme.AbkFido.Translucent" />
 
         <receiver
             android:name=".SyncTriggerReceiver"

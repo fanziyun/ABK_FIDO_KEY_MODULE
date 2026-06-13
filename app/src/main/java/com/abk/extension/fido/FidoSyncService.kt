@@ -72,23 +72,17 @@ class FidoSyncService : Service() {
 
     private fun maybeHandlePendingAuth() {
         val pending = FidoKernelBridge.readPendingAuthRequest() ?: return
-        if (pending.requestId == lastPromptRequestId || FidoAuthPromptActivity.active) {
+        if (pending.requestId == lastPromptRequestId || BiometricAuthBridge.isAuthenticating) {
             return
         }
         lastPromptRequestId = pending.requestId
-        val launch = Intent(this, FidoAuthPromptActivity::class.java).apply {
-            addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_NO_ANIMATION or
-                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-            )
-            putExtra(FidoAuthPromptActivity.EXTRA_REQUEST_ID, pending.requestId)
-            putExtra(FidoAuthPromptActivity.EXTRA_COMMAND, pending.command)
-            putExtra(FidoAuthPromptActivity.EXTRA_RP_ID, pending.rpId)
-        }
-        try {
-            startActivity(launch)
-        } catch (t: Throwable) {
+        BiometricAuthBridge.begin(pending.requestId)
+        val launch = RootShell.launchFidoAuthPromptActivity(
+            requestId = pending.requestId,
+            command = pending.command,
+            rpId = pending.rpId
+        )
+        if (!launch.success) {
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(
                     this,
@@ -98,6 +92,18 @@ class FidoSyncService : Service() {
             }
             FidoKernelBridge.deny(pending.requestId)
             RootShell.launchAbkExtensionManager()
+            BiometricAuthBridge.finish(false)
+            return
+        }
+
+        val result = BiometricAuthBridge.await(AUTH_PROMPT_TIMEOUT_MS)
+        when (result) {
+            true -> FidoKernelBridge.allow(pending.requestId)
+            false -> FidoKernelBridge.deny(pending.requestId)
+            null -> {
+                FidoKernelBridge.deny(pending.requestId)
+                RootShell.launchAbkExtensionManager()
+            }
         }
     }
 
@@ -137,6 +143,7 @@ class FidoSyncService : Service() {
     companion object {
         const val ACTION_SYNC_NOW = "com.abk.extension.fido.action.SYNC_NOW"
         const val EXTRA_REASON = "reason"
+        private const val AUTH_PROMPT_TIMEOUT_MS = 25_000L
 
         private const val CHANNEL_ID = "abk_fido_companion"
         private const val NOTIFICATION_ID = 1002

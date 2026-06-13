@@ -42,10 +42,10 @@ internal class MetadataSyncCoordinator(context: Context) {
             localDbFile.parentFile?.mkdirs()
 
             val importDb = RootShell.copyFileFromMetadata(METADATA_DB_PATH, localDbFile.absolutePath, ownerUid)
-            when (importDb.exitCode) {
-                0 -> notes += "imported sqlite mirror from /metadata"
-                RootShell.EXIT_MISSING -> notes += "metadata sqlite mirror not found"
-                else -> return SyncResult(false, notes + "failed to import metadata db")
+            if (importDb.success) {
+                notes += "imported sqlite mirror from /metadata"
+            } else {
+                notes += "metadata sqlite mirror not found"
             }
 
             val repository = StoreSnapshotRepository(localDbFile)
@@ -54,35 +54,31 @@ internal class MetadataSyncCoordinator(context: Context) {
             val metadataBlob = RootShell.readFileBase64(METADATA_BLOB_PATH)
             val localBlob = repository.loadSnapshot()
 
-            when (metadataBlob.exitCode) {
-                0 -> {
-                    val blob = runCatching {
-                        Base64.decode(metadataBlob.stdout, Base64.DEFAULT)
-                    }.getOrElse {
-                        return SyncResult(false, notes + "kernel blob decode failed")
-                    }
-                    if (localBlob == null || !blob.contentEquals(localBlob)) {
-                        repository.saveSnapshot(blob)
-                        notes += "captured kernel blob into sqlite"
-                    } else {
-                        notes += "kernel blob already mirrored"
-                    }
+            if (metadataBlob.success) {
+                val blob = runCatching {
+                    Base64.decode(metadataBlob.stdout, Base64.DEFAULT)
+                }.getOrElse {
+                    return SyncResult(false, notes + "kernel blob decode failed")
                 }
-                RootShell.EXIT_MISSING -> {
-                    if (localBlob != null) {
-                        val exportBlob = RootShell.writeFileBase64(
-                            path = METADATA_BLOB_PATH,
-                            payloadBase64 = Base64.encodeToString(localBlob, Base64.NO_WRAP)
-                        )
-                        if (!exportBlob.success) {
-                            return SyncResult(false, notes + "failed to restore kernel blob to /metadata")
-                        }
-                        notes += "restored kernel blob from sqlite"
-                    } else {
-                        notes += "kernel blob not found"
-                    }
+                if (localBlob == null || !blob.contentEquals(localBlob)) {
+                    repository.saveSnapshot(blob)
+                    notes += "captured kernel blob into sqlite"
+                } else {
+                    notes += "kernel blob already mirrored"
                 }
-                else -> return SyncResult(false, notes + "failed to read kernel blob from /metadata")
+            } else {
+                if (localBlob != null) {
+                    val exportBlob = RootShell.writeFileBase64(
+                        path = METADATA_BLOB_PATH,
+                        payloadBase64 = Base64.encodeToString(localBlob, Base64.NO_WRAP)
+                    )
+                    if (!exportBlob.success) {
+                        return SyncResult(false, notes + "failed to restore kernel blob to /metadata")
+                    }
+                    notes += "restored kernel blob from sqlite"
+                } else {
+                    notes += "kernel blob not found"
+                }
             }
 
             val exportDb = RootShell.copyFileToMetadata(localDbFile.absolutePath, METADATA_DB_PATH)

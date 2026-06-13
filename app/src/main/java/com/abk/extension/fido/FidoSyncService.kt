@@ -29,6 +29,7 @@ class FidoSyncService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        RootShell.init()
         startForeground(NOTIFICATION_ID, buildNotification())
         running = true
         Log.i(TAG, "service created")

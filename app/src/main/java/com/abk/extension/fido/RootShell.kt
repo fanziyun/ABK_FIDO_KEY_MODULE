@@ -1,17 +1,32 @@
 package com.abk.extension.fido
 
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import com.topjohnwu.superuser.Shell
 
 internal object RootShell {
-    const val EXIT_MISSING = 3
-
     data class CommandResult(
         val exitCode: Int,
         val stdout: String,
     ) {
         val success: Boolean
             get() = exitCode == 0
+    }
+
+    @Volatile
+    private var initialized = false
+    private val initLock = Any()
+
+    fun init() {
+        if (initialized) return
+        synchronized(initLock) {
+            if (initialized) return
+            Shell.enableVerboseLogging = false
+            Shell.setDefaultBuilder(
+                Shell.Builder.create()
+                    .setFlags(Shell.FLAG_MOUNT_MASTER or Shell.FLAG_REDIRECT_STDERR)
+                    .setTimeout(10)
+            )
+            initialized = true
+        }
     }
 
     fun isRootAvailable(): Boolean {
@@ -23,7 +38,7 @@ internal object RootShell {
         return run(
             """
             file=${shellQuote(path)}
-            [ -f "${'$'}file" ] || exit $EXIT_MISSING
+            [ -f "${'$'}file" ] || exit 3
             base64 "${'$'}file" 2>/dev/null | tr -d '\n'
             """.trimIndent()
         )
@@ -33,7 +48,7 @@ internal object RootShell {
         return run(
             """
             file=${shellQuote(path)}
-            [ -f "${'$'}file" ] || exit $EXIT_MISSING
+            [ -f "${'$'}file" ] || exit 3
             cat "${'$'}file"
             """.trimIndent()
         )
@@ -64,7 +79,7 @@ internal object RootShell {
             """
             src=${shellQuote(srcPath)}
             dst=${shellQuote(dstPath)}
-            [ -f "${'$'}src" ] || exit $EXIT_MISSING
+            [ -f "${'$'}src" ] || exit 3
             cp -f "${'$'}src" "${'$'}dst"
             chmod 0600 "${'$'}dst" 2>/dev/null || true
             restorecon "${'$'}dst" 2>/dev/null || true
@@ -77,7 +92,7 @@ internal object RootShell {
             """
             src=${shellQuote(srcPath)}
             dst=${shellQuote(dstPath)}
-            [ -f "${'$'}src" ] || exit $EXIT_MISSING
+            [ -f "${'$'}src" ] || exit 3
             cp -f "${'$'}src" "${'$'}dst"
             chown ${ownerUid}:${ownerUid} "${'$'}dst" 2>/dev/null || true
             chmod 0600 "${'$'}dst" 2>/dev/null || true
@@ -111,30 +126,56 @@ internal object RootShell {
     }
 
     fun run(script: String): CommandResult {
-        val process = try {
-            ProcessBuilder("su", "-c", script)
-                .redirectErrorStream(true)
-                .start()
+        init()
+        return try {
+            val output = mutableListOf<String>()
+            val result = createRootShell(timeoutSeconds = 10L).use { shell ->
+                shell.newJob()
+                    .to(output, output)
+                    .add(script)
+                    .exec()
+            }
+            CommandResult(
+                exitCode = if (result.isSuccess) 0 else 1,
+                stdout = output.joinToString("\n")
+            )
         } catch (t: Throwable) {
-            return CommandResult(exitCode = 127, stdout = t.message.orEmpty())
+            CommandResult(exitCode = 127, stdout = t.message.orEmpty())
         }
+    }
 
-        val stdout = BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-            buildString {
-                var first = true
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    if (!first) {
-                        append('\n')
-                    }
-                    append(line)
-                    first = false
-                }
+    private fun createRootShell(timeoutSeconds: Long): Shell {
+        val builder = Shell.Builder.create()
+            .setFlags(Shell.FLAG_MOUNT_MASTER or Shell.FLAG_REDIRECT_STDERR)
+            .setTimeout(timeoutSeconds)
+        val candidates = arrayOf(
+            arrayOf("/data/adb/ksud", "debug", "su", "-g"),
+            arrayOf("ksud", "debug", "su", "-g"),
+            arrayOf("su", "-mm"),
+            arrayOf("su")
+        )
+        candidates.forEach { command ->
+            try {
+                val shell = builder.build(*command)
+                if (isShellRoot(shell)) return shell
+                shell.close()
+            } catch (_: Throwable) {
             }
         }
 
-        val exitCode = process.waitFor()
-        return CommandResult(exitCode = exitCode, stdout = stdout)
+        val shell = builder.build()
+        if (isShellRoot(shell)) return shell
+        shell.close()
+        throw IllegalStateException("Root shell unavailable")
+    }
+
+    private fun isShellRoot(shell: Shell): Boolean {
+        val output = mutableListOf<String>()
+        val result = shell.newJob()
+            .to(output, output)
+            .add("id -u")
+            .exec()
+        return result.isSuccess && output.firstOrNull()?.trim() == "0"
     }
 
     private fun shellQuote(value: String): String {

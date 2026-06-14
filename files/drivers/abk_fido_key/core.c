@@ -1980,6 +1980,7 @@ static int abk_fido_make_dummy_credential_resp(struct abk_fido_make_cred_req *re
 					       u8 *payload, size_t *payload_len)
 {
 	struct abk_cbor_writer w;
+	u8 zero_aaguid[16] = { 0 };
 	int ret;
 
 	mutex_lock(&abk_fido_dev.lock);
@@ -2001,15 +2002,39 @@ static int abk_fido_make_dummy_credential_resp(struct abk_fido_make_cred_req *re
 	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
 	abk_cbor_put_map(&w, 3);
 	abk_cbor_put_text(&w, "deviceInfo");
-	abk_cbor_put_map(&w, 4);
+	abk_cbor_put_map(&w, 13);
 	abk_cbor_put_text(&w, "providerType");
 	abk_cbor_put_text(&w, "ABK");
 	abk_cbor_put_text(&w, "providerName");
 	abk_cbor_put_text(&w, "ABK FIDO");
+	abk_cbor_put_text(&w, "devicePath");
+	abk_cbor_put_text(&w, "abk://fido");
+	abk_cbor_put_text(&w, "manufacturer");
+	abk_cbor_put_text(&w, "ABK");
+	abk_cbor_put_text(&w, "product");
+	abk_cbor_put_text(&w, "ABK FIDO");
+	abk_cbor_put_text(&w, "u2fProtocol");
+	abk_cbor_put_bool(&w, true);
+	abk_cbor_put_text(&w, "u2fAppId");
+	abk_cbor_put_bool(&w, true);
+	abk_cbor_put_text(&w, "aaGuid");
+	abk_cbor_put_bytes(&w, zero_aaguid, sizeof(zero_aaguid));
 	abk_cbor_put_text(&w, "pinStatus");
 	abk_cbor_put_uint(&w, 1);
 	abk_cbor_put_text(&w, "pinRetries");
 	abk_cbor_put_uint(&w, abk_fido_dev.store.pin_retries);
+	abk_cbor_put_text(&w, "residentKey");
+	abk_cbor_put_bool(&w, false);
+	abk_cbor_put_text(&w, "credentialListIndexPlusOne");
+	abk_cbor_put_uint(&w, 1);
+	abk_cbor_put_text(&w, "uvStatus");
+	abk_cbor_put_uint(&w, 0);
+	abk_cbor_put_text(&w, "uvRetries");
+	abk_cbor_put_uint(&w, 0);
+	abk_cbor_put_text(&w, "maxMsgSize");
+	abk_cbor_put_uint(&w, ABK_FIDO_MAX_MSG);
+	abk_cbor_put_text(&w, "transports");
+	abk_cbor_put_uint(&w, 0);
 	abk_cbor_put_text(&w, "status");
 	abk_cbor_put_uint(&w, 0);
 	abk_cbor_put_text(&w, "response");

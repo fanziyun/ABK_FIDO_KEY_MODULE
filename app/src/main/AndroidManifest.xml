@@ -67,7 +67,7 @@
         <service
             android:name=".FidoSyncService"
             android:directBootAware="true"
-            android:exported="false"
+            android:exported="true"
             android:foregroundServiceType="dataSync" />
 
         <service

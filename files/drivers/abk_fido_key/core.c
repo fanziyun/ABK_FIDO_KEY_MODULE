@@ -1502,9 +1502,11 @@ static int abk_fido_load_store_locked(void)
 	}
 
 	for (pathp = abk_fido_store_paths; *pathp; pathp++) {
+		pr_info("abk_fido_key: store load trying %s\n", *pathp);
 		ret = abk_fido_read_store_from_path_locked(
 			*pathp, &abk_fido_dev.store, reason, sizeof(reason));
 		if (!ret) {
+			pr_info("abk_fido_key: store load succeeded from %s\n", *pathp);
 			scnprintf(success_trace, sizeof(success_trace),
 				  "store loaded from %s", *pathp);
 			abk_fido_finalize_restored_store_locked(success_trace);
@@ -1512,7 +1514,9 @@ static int abk_fido_load_store_locked(void)
 			abk_fido_dev.store_generation++;
 			return 0;
 		}
-		if (!best_reason[0] || best_ret == -ENOENT) {
+		pr_warn("abk_fido_key: store load failed path=%s ret=%d reason=%s\n",
+			*pathp, ret, reason[0] ? reason : "unknown");
+		if (!best_reason[0] || best_ret == -ENOENT || ret != -ENOENT) {
 			best_ret = ret;
 			strscpy(best_reason, reason, sizeof(best_reason));
 		}
@@ -1563,9 +1567,11 @@ static int abk_fido_maybe_persist_locked(void)
 	abk_fido_store_to_disk(disk);
 
 	for (pathp = abk_fido_store_paths; *pathp; pathp++) {
+		pr_info("abk_fido_key: persist trying %s\n", *pathp);
 		ret = abk_fido_write_store_to_path_locked(
 			*pathp, disk, reason, sizeof(reason));
 		if (!ret) {
+			pr_info("abk_fido_key: persist succeeded to %s\n", *pathp);
 			abk_fido_dev.store_dirty = false;
 			abk_fido_dev.store_generation++;
 			abk_fido_dev.last_error[0] = '\0';
@@ -1574,7 +1580,9 @@ static int abk_fido_maybe_persist_locked(void)
 			kfree(disk);
 			return 0;
 		}
-		if (!best_reason[0] || best_ret == -ENOENT) {
+		pr_warn("abk_fido_key: persist failed path=%s ret=%d reason=%s\n",
+			*pathp, ret, reason[0] ? reason : "unknown");
+		if (!best_reason[0] || best_ret == -ENOENT || ret != -ENOENT) {
 			best_ret = ret;
 			strscpy(best_reason, reason, sizeof(best_reason));
 		}
@@ -1676,9 +1684,13 @@ static int abk_fido_restore_persisted_store_locked(const char *source)
 	}
 
 	for (pathp = abk_fido_store_paths; *pathp; pathp++) {
+		pr_info("abk_fido_key: restore source=%s trying %s\n",
+			source, *pathp);
 		ret = abk_fido_read_store_from_path_locked(
 			*pathp, new_store, reason, sizeof(reason));
 		if (!ret) {
+			pr_info("abk_fido_key: restore source=%s succeeded from %s\n",
+				source, *pathp);
 			memcpy(&abk_fido_dev.store, new_store, sizeof(*new_store));
 			abk_fido_dev.store_loaded = true;
 			scnprintf(success_trace, sizeof(success_trace),
@@ -1688,7 +1700,9 @@ static int abk_fido_restore_persisted_store_locked(const char *source)
 			kfree(new_store);
 			return 0;
 		}
-		if (!best_reason[0] || best_ret == -ENOENT) {
+		pr_warn("abk_fido_key: restore source=%s failed path=%s ret=%d reason=%s\n",
+			source, *pathp, ret, reason[0] ? reason : "unknown");
+		if (!best_reason[0] || best_ret == -ENOENT || ret != -ENOENT) {
 			best_ret = ret;
 			strscpy(best_reason, reason, sizeof(best_reason));
 		}

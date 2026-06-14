@@ -1980,7 +1980,6 @@ static int abk_fido_make_dummy_credential_resp(struct abk_fido_make_cred_req *re
 					       u8 *payload, size_t *payload_len)
 {
 	struct abk_cbor_writer w;
-	u8 auth_data[37] = { 0 };
 	int ret;
 
 	mutex_lock(&abk_fido_dev.lock);
@@ -2001,15 +2000,19 @@ static int abk_fido_make_dummy_credential_resp(struct abk_fido_make_cred_req *re
 
 	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
 	abk_cbor_put_map(&w, 3);
-	abk_cbor_put_int(&w, 1);
-	abk_cbor_put_text(&w, "packed");
-	abk_cbor_put_int(&w, 2);
-	abk_cbor_put_bytes(&w, auth_data, sizeof(auth_data));
-	abk_cbor_put_int(&w, 3);
-	abk_cbor_put_map(&w, 2);
-	abk_cbor_put_text(&w, "alg");
-	abk_cbor_put_int(&w, ABK_FIDO_COSE_ALG_ES256);
-	abk_cbor_put_text(&w, "sig");
+	abk_cbor_put_text(&w, "deviceInfo");
+	abk_cbor_put_map(&w, 4);
+	abk_cbor_put_text(&w, "providerType");
+	abk_cbor_put_text(&w, "ABK");
+	abk_cbor_put_text(&w, "providerName");
+	abk_cbor_put_text(&w, "ABK FIDO");
+	abk_cbor_put_text(&w, "pinStatus");
+	abk_cbor_put_uint(&w, 1);
+	abk_cbor_put_text(&w, "pinRetries");
+	abk_cbor_put_uint(&w, abk_fido_dev.store.pin_retries);
+	abk_cbor_put_text(&w, "status");
+	abk_cbor_put_uint(&w, 0);
+	abk_cbor_put_text(&w, "response");
 	abk_cbor_put_bytes(&w, NULL, 0);
 	if (w.err) {
 		ret = w.err;

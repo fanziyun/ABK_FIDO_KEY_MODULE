@@ -2006,6 +2006,13 @@ static int abk_fido_credential_matches_allow(struct abk_fido_get_assert_req *req
 		    !memcmp(req->allow[i].id, cred->cred_id, sizeof(cred->cred_id)))
 			return 1;
 	}
+
+	pr_info("abk_fido_key: allowlist mismatch rp=%s cred=%*phN allow_count=%u first_allow=%*phN\n",
+		cred->rp_id,
+		8, cred->cred_id,
+		req->allow_count,
+		(req->allow_count && req->allow[0].present) ? 8 : 0,
+		(req->allow_count && req->allow[0].present) ? req->allow[0].id : cred->cred_id);
 	return 0;
 }
 
@@ -2409,13 +2416,23 @@ static int abk_fido_find_rp_credential_locked(struct abk_fido_get_assert_req *re
 
 		if (!cred->in_use)
 			continue;
-		if (!abk_fido_rp_matches_request(cred->rp_id, req->rp_id))
+		if (!abk_fido_rp_matches_request(cred->rp_id, req->rp_id)) {
+			pr_info("abk_fido_key: candidate slot=%u skip rp stored=%s requested=%s cred=%*phN\n",
+				i, cred->rp_id, req->rp_id, 8, cred->cred_id);
 			continue;
-		if (!abk_fido_credential_matches_allow(req, cred))
+		}
+		if (!abk_fido_credential_matches_allow(req, cred)) {
+			pr_info("abk_fido_key: candidate slot=%u rp match but allowlist rejected cred=%*phN\n",
+				i, 8, cred->cred_id);
 			continue;
+		}
+		pr_info("abk_fido_key: candidate slot=%u selected rp=%s cred=%*phN\n",
+			i, cred->rp_id, 8, cred->cred_id);
 		return i;
 	}
 
+	pr_info("abk_fido_key: no assertion credential matched rp=%s allow_count=%u\n",
+		req->rp_id, req->allow_count);
 	return -ENOENT;
 }
 

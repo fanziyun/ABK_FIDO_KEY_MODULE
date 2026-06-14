@@ -82,21 +82,32 @@ internal class MetadataSyncCoordinator(context: Context) {
             } else {
                 null
             }
-            val mergedBlob = mergeStoreSnapshots(
-                mergeStoreSnapshots(localBlob, metadataBlobBytes),
-                if (kernelCredentialCount > 0) kernelBlobBytes else null
-            )
-
-            if (mergedBlob != null) {
-                if (localBlob == null || !mergedBlob.contentEquals(localBlob)) {
-                    repository.saveSnapshot(mergedBlob)
-                    notes += "updated sqlite snapshot from merged blobs"
+            if (kernelBlobBytes != null && kernelCredentialCount > 0) {
+                if (localBlob == null || !kernelBlobBytes.contentEquals(localBlob)) {
+                    repository.saveSnapshot(kernelBlobBytes)
+                    notes += "captured kernel blob into sqlite"
                 } else {
-                    notes += "sqlite snapshot already up to date"
+                    notes += "sqlite snapshot already matches kernel blob"
                 }
 
-                if (kernelBlobBytes == null || !mergedBlob.contentEquals(kernelBlobBytes) ||
-                    mergedBlob.storeCredentialCount() != kernelCredentialCount) {
+                val exportBlob = RootShell.writeFileBase64(
+                    path = METADATA_BLOB_PATH,
+                    payloadBase64 = Base64.encodeToString(kernelBlobBytes, Base64.NO_WRAP)
+                )
+                if (!exportBlob.success) {
+                    return SyncResult(false, notes + "failed to export kernel blob to /metadata")
+                }
+                notes += "exported kernel blob to /metadata"
+            } else {
+                val mergedBlob = mergeStoreSnapshots(localBlob, metadataBlobBytes)
+                if (mergedBlob != null) {
+                    if (localBlob == null || !mergedBlob.contentEquals(localBlob)) {
+                        repository.saveSnapshot(mergedBlob)
+                        notes += "updated sqlite snapshot from merged blobs"
+                    } else {
+                        notes += "sqlite snapshot already up to date"
+                    }
+
                     val targetCount = mergedBlob.storeCredentialCount()
                     val restoreKernel = FidoKernelBridge.writeStoreBlobBase64(
                         Base64.encodeToString(mergedBlob, Base64.NO_WRAP)
@@ -107,20 +118,18 @@ internal class MetadataSyncCoordinator(context: Context) {
                     } else {
                         notes += "kernel blob restore via sysfs failed"
                     }
-                } else {
-                    notes += "kernel blob already up to date"
-                }
 
-                val exportBlob = RootShell.writeFileBase64(
-                    path = METADATA_BLOB_PATH,
-                    payloadBase64 = Base64.encodeToString(mergedBlob, Base64.NO_WRAP)
-                )
-                if (!exportBlob.success) {
-                    return SyncResult(false, notes + "failed to export merged blob to /metadata")
+                    val exportBlob = RootShell.writeFileBase64(
+                        path = METADATA_BLOB_PATH,
+                        payloadBase64 = Base64.encodeToString(mergedBlob, Base64.NO_WRAP)
+                    )
+                    if (!exportBlob.success) {
+                        return SyncResult(false, notes + "failed to export merged blob to /metadata")
+                    }
+                    notes += "exported merged blob to /metadata"
+                } else {
+                    notes += "kernel blob not found"
                 }
-                notes += "exported merged blob to /metadata"
-            } else {
-                notes += "kernel blob not found"
             }
 
             val exportDb = RootShell.copyFileToMetadata(localDbFile.absolutePath, METADATA_DB_PATH)

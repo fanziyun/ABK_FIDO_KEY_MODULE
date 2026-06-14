@@ -1353,6 +1353,19 @@ static bool abk_fido_pin_configured_locked(void)
 					sizeof(abk_fido_dev.store.pin_hash));
 }
 
+static u32 abk_fido_store_crc32(const struct abk_fido_store_disk *disk)
+{
+	u32 crc;
+	const u8 *ptr;
+	size_t len;
+
+	ptr = (const u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count);
+	len = sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count);
+
+	crc = crc32_le(~0U, ptr, len);
+	return ~crc;
+}
+
 static void abk_fido_set_last_trace_locked(const char *fmt, ...)
 {
 	va_list args;
@@ -1369,6 +1382,7 @@ static int abk_fido_store_from_disk_into(struct abk_fido_store_disk *disk,
 {
 	unsigned int i;
 	u32 crc;
+	u32 legacy_crc;
 
 	if (le32_to_cpu(disk->magic) != ABK_FIDO_STORE_MAGIC) {
 		if (reason && reason_len)
@@ -1383,14 +1397,21 @@ static int abk_fido_store_from_disk_into(struct abk_fido_store_disk *disk,
 		return -EINVAL;
 	}
 
-	crc = crc32_le(0, (u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count),
-		       sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count));
+	crc = abk_fido_store_crc32(disk);
 	if (crc != le32_to_cpu(disk->crc32)) {
-		if (reason && reason_len)
-			scnprintf(reason, reason_len,
-				  "invalid store crc stored=0x%08x calc=0x%08x",
-				  le32_to_cpu(disk->crc32), crc);
-		return -EILSEQ;
+		legacy_crc = crc32_le(0,
+			(u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count),
+			sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count));
+		if (legacy_crc == le32_to_cpu(disk->crc32)) {
+			pr_info("abk_fido_key: accepted legacy store crc 0x%08x\n",
+				legacy_crc);
+		} else {
+			if (reason && reason_len)
+				scnprintf(reason, reason_len,
+					  "invalid store crc stored=0x%08x calc=0x%08x legacy=0x%08x",
+					  le32_to_cpu(disk->crc32), crc, legacy_crc);
+			return -EILSEQ;
+		}
 	}
 
 	memset(store, 0, sizeof(*store));
@@ -1453,8 +1474,7 @@ static void abk_fido_store_to_disk(struct abk_fido_store_disk *disk)
 		memcpy(dc->pub_key, sc->pub_key, sizeof(dc->pub_key));
 	}
 
-	crc = crc32_le(0, (u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count),
-		       sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count));
+	crc = abk_fido_store_crc32(disk);
 	disk->crc32 = cpu_to_le32(crc);
 }
 
@@ -1624,6 +1644,7 @@ static int abk_fido_read_store_from_path_locked(const char *path,
 	int ret = 0;
 	char validation_reason[96] = "";
 	u32 calc_crc;
+	u32 legacy_crc;
 
 	file = abk_fido_filp_open_kernel(path, O_RDONLY, 0);
 	if (IS_ERR(file)) {
@@ -1652,15 +1673,17 @@ static int abk_fido_read_store_from_path_locked(const char *path,
 		goto out;
 	}
 
-	calc_crc = crc32_le(0,
+	calc_crc = abk_fido_store_crc32(disk);
+	legacy_crc = crc32_le(0,
 		(u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count),
 		sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count));
-	pr_info("abk_fido_key: read path=%s magic=0x%08x version=%u stored_crc=0x%08x calc_crc=0x%08x sign_count=%u head=%*phN\n",
+	pr_info("abk_fido_key: read path=%s magic=0x%08x version=%u stored_crc=0x%08x calc_crc=0x%08x legacy_crc=0x%08x sign_count=%u head=%*phN\n",
 		path,
 		le32_to_cpu(disk->magic),
 		le32_to_cpu(disk->version),
 		le32_to_cpu(disk->crc32),
 		calc_crc,
+		legacy_crc,
 		le32_to_cpu(disk->sign_count),
 		16, disk);
 

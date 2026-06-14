@@ -2017,6 +2017,10 @@ static int abk_fido_make_dummy_credential_resp(struct abk_fido_make_cred_req *re
 	}
 
 	*payload_len = w.pos;
+	pr_info("abk_fido_key: dummy makeCredential response len=%zu head=%*phN\n",
+		*payload_len,
+		(*payload_len >= 24) ? 24 : (int)*payload_len,
+		payload);
 	ret = 0;
 out_unlock:
 	mutex_unlock(&abk_fido_dev.lock);

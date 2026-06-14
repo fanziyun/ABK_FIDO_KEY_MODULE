@@ -11,8 +11,9 @@ config ABK_FIDO_KEY
 	  Add a kernel-integrated FIDO2 HID authenticator that is injected
 	  into the active Android USB configfs gadget as an extra HID
 	  interface. The implementation exposes a /dev/hidgX debug endpoint
-	  and attempts to load authenticator state from
-	  /metadata/abk_fido_store.bin.
+	  and attempts to load authenticator state from the persisted blob,
+	  preferring /metadata/abk_fido_store.bin and falling back to
+	  /data/adb/abk_fido_store.bin when needed.
 
 config ABK_FIDO_KEY_CTAP2
 	bool "Enable CTAP2 core"
@@ -35,5 +36,6 @@ config ABK_FIDO_KEY_PERSIST_ADB_DATA
 	default y
 	help
 	  Compatibility symbol kept so older ABK defconfigs continue to enable
-	  FIDO persistence after the storage backend moved from /data/adb to
-	  /metadata.
+	  FIDO persistence. The runtime code prefers /metadata, but can fall
+	  back to /data/adb when SELinux policy prevents kernel-domain access
+	  to metadata_file.

@@ -8,10 +8,36 @@ import java.io.File
 private const val LOCAL_DB_NAME = "abk_fido.db"
 private const val METADATA_DB_PATH = "/metadata/abk_fido.db"
 private const val METADATA_BLOB_PATH = "/metadata/abk_fido_store.bin"
+private const val ADB_DB_PATH = "/data/adb/abk_fido.db"
+private const val ADB_BLOB_PATH = "/data/adb/abk_fido_store.bin"
 private const val STORE_DISK_HEADER_SIZE = 84
 private const val STORE_DISK_CRED_SIZE = 452
 private const val STORE_DISK_MAX_CREDS = 32
 private val syncLock = Any()
+
+private data class PersistenceBackend(
+    val name: String,
+    val blobPath: String,
+    val dbPath: String,
+)
+
+private data class PersistedBlob(
+    val backend: PersistenceBackend,
+    val bytes: ByteArray,
+)
+
+private val PERSISTENCE_BACKENDS = listOf(
+    PersistenceBackend(
+        name = "metadata",
+        blobPath = METADATA_BLOB_PATH,
+        dbPath = METADATA_DB_PATH,
+    ),
+    PersistenceBackend(
+        name = "adb",
+        blobPath = ADB_BLOB_PATH,
+        dbPath = ADB_DB_PATH,
+    ),
+)
 
 data class SyncResult(
     val success: Boolean,
@@ -44,33 +70,38 @@ internal class MetadataSyncCoordinator(context: Context) {
 
             localDbFile.parentFile?.mkdirs()
 
-            val importDb = RootShell.copyFileFromMetadata(METADATA_DB_PATH, localDbFile.absolutePath, ownerUid)
-            if (importDb.success) {
-                notes += "imported sqlite mirror from /metadata"
+            var activeBackend = importDatabase()
+            if (activeBackend != null) {
+                notes += "imported sqlite mirror from ${activeBackend.dbPath}"
             } else {
-                notes += "metadata sqlite mirror not found"
+                notes += "persistent sqlite mirror not found"
             }
 
             val repository = StoreSnapshotRepository(localDbFile)
             repository.ensureSchema()
 
             val kernelCredentialCount = FidoKernelBridge.readCredentialCount() ?: 0
-            val metadataBlobBytes = RootShell.readFileBase64(METADATA_BLOB_PATH)
-                .takeIf { it.success }
-                ?.stdout
-                ?.let { raw -> runCatching { Base64.decode(raw, Base64.DEFAULT) }.getOrNull() }
+            val persistedBlob = readPersistedBlob()
             var localBlob = repository.loadSnapshot()
 
             when {
-                metadataBlobBytes != null -> {
-                    localBlob = syncSnapshot(repository, localBlob, metadataBlobBytes, "metadata", notes)
-                    val targetCount = metadataBlobBytes.storeCredentialCount()
+                persistedBlob != null -> {
+                    activeBackend = persistedBlob.backend
+                    localBlob = syncSnapshot(
+                        repository = repository,
+                        currentBlob = localBlob,
+                        sourceBlob = persistedBlob.bytes,
+                        sourceLabel = persistedBlob.backend.blobPath,
+                        notes = notes
+                    )
+                    val targetCount = persistedBlob.bytes.storeCredentialCount()
                     if (targetCount < 0) {
-                        return SyncResult(false, notes + "metadata blob malformed")
+                        return SyncResult(false, notes + "${persistedBlob.backend.name} blob malformed")
                     }
                     if (shouldRestoreKernel(kernelCredentialCount, targetCount)) {
                         val restoreFailure = restoreKernelFromBlob(
-                            restoreBlob = metadataBlobBytes,
+                            restoreBlob = persistedBlob.bytes,
+                            preferredBackend = persistedBlob.backend,
                             targetCount = targetCount,
                             notes = notes
                         )
@@ -82,6 +113,7 @@ internal class MetadataSyncCoordinator(context: Context) {
                     }
                 }
                 localBlob != null -> {
+                    val preferredBackend = activeBackend ?: PERSISTENCE_BACKENDS.last()
                     val targetCount = localBlob.storeCredentialCount()
                     if (targetCount < 0) {
                         return SyncResult(false, notes + "local sqlite snapshot malformed")
@@ -89,12 +121,13 @@ internal class MetadataSyncCoordinator(context: Context) {
                     if (kernelCredentialCount > 0) {
                         return SyncResult(
                             success = false,
-                            notes = notes + "metadata blob missing while kernel has credentials"
+                            notes = notes + "persistent blob missing while kernel has credentials"
                         )
                     }
-                    notes += "metadata blob missing, restoring from sqlite snapshot"
+                    notes += "persistent blob missing, restoring from sqlite snapshot"
                     val restoreFailure = restoreKernelFromBlob(
                         restoreBlob = localBlob,
+                        preferredBackend = preferredBackend,
                         targetCount = targetCount,
                         notes = notes
                     )
@@ -107,11 +140,12 @@ internal class MetadataSyncCoordinator(context: Context) {
                 }
             }
 
-            val exportDb = RootShell.copyFileToMetadata(localDbFile.absolutePath, METADATA_DB_PATH)
-            if (!exportDb.success) {
-                return SyncResult(false, notes + "failed to export sqlite mirror to /metadata")
+            val dbBackend = activeBackend ?: PERSISTENCE_BACKENDS.first()
+            val exportDbBackend = writeDatabaseToPersistence(dbBackend, notes)
+            if (exportDbBackend == null) {
+                return SyncResult(false, notes + "failed to export sqlite mirror to persistent storage")
             }
-            notes += "exported sqlite mirror to /metadata"
+            notes += "exported sqlite mirror to ${exportDbBackend.dbPath}"
             return SyncResult(true, notes)
         }
     }
@@ -148,17 +182,19 @@ private fun MetadataSyncCoordinator.shouldRestoreKernel(
 
 private fun MetadataSyncCoordinator.restoreKernelFromBlob(
     restoreBlob: ByteArray,
+    preferredBackend: PersistenceBackend,
     targetCount: Int,
     notes: MutableList<String>,
 ): SyncResult? {
-    val exportBlob = RootShell.writeFileBase64(
-        path = METADATA_BLOB_PATH,
-        payloadBase64 = Base64.encodeToString(restoreBlob, Base64.NO_WRAP)
+    val exportBackend = writeBlobToPersistence(
+        preferredBackend = preferredBackend,
+        restoreBlob = restoreBlob,
+        notes = notes
     )
-    if (!exportBlob.success) {
-        return SyncResult(false, notes + "failed to write restore blob to /metadata")
+    if (exportBackend == null) {
+        return SyncResult(false, notes + "failed to write restore blob to persistent storage")
     }
-    notes += "exported restore blob to /metadata"
+    notes += "exported restore blob to ${exportBackend.blobPath}"
 
     val generationBefore = FidoKernelBridge.readStoreGeneration()
     notes += "generation_before=${generationBefore ?: -1}"
@@ -188,8 +224,72 @@ private fun MetadataSyncCoordinator.restoreKernelFromBlob(
         return kernelRestoreFailure(notes, "restore incomplete")
     }
 
-    notes += "restored metadata blob into kernel"
+    notes += "restored persisted blob into kernel"
     return null
+}
+
+private fun MetadataSyncCoordinator.importDatabase(): PersistenceBackend? {
+    for (backend in PERSISTENCE_BACKENDS) {
+        val importDb = RootShell.copyFileFromMetadata(
+            backend.dbPath,
+            localDbFile.absolutePath,
+            ownerUid
+        )
+        if (importDb.success) {
+            return backend
+        }
+    }
+    return null
+}
+
+private fun MetadataSyncCoordinator.readPersistedBlob(): PersistedBlob? {
+    for (backend in PERSISTENCE_BACKENDS) {
+        val blob = RootShell.readFileBase64(backend.blobPath)
+            .takeIf { it.success }
+            ?.stdout
+            ?.let { raw -> runCatching { Base64.decode(raw, Base64.DEFAULT) }.getOrNull() }
+        if (blob != null) {
+            return PersistedBlob(backend = backend, bytes = blob)
+        }
+    }
+    return null
+}
+
+private fun MetadataSyncCoordinator.writeBlobToPersistence(
+    preferredBackend: PersistenceBackend,
+    restoreBlob: ByteArray,
+    notes: MutableList<String>,
+): PersistenceBackend? {
+    val payloadBase64 = Base64.encodeToString(restoreBlob, Base64.NO_WRAP)
+    for (backend in orderedBackends(preferredBackend)) {
+        val exportBlob = RootShell.writeFileBase64(
+            path = backend.blobPath,
+            payloadBase64 = payloadBase64
+        )
+        if (exportBlob.success) {
+            return backend
+        }
+        notes += "write failed for ${backend.blobPath}"
+    }
+    return null
+}
+
+private fun MetadataSyncCoordinator.writeDatabaseToPersistence(
+    preferredBackend: PersistenceBackend,
+    notes: MutableList<String>,
+): PersistenceBackend? {
+    for (backend in orderedBackends(preferredBackend)) {
+        val exportDb = RootShell.copyFileToMetadata(localDbFile.absolutePath, backend.dbPath)
+        if (exportDb.success) {
+            return backend
+        }
+        notes += "sqlite export failed for ${backend.dbPath}"
+    }
+    return null
+}
+
+private fun orderedBackends(preferredBackend: PersistenceBackend): List<PersistenceBackend> {
+    return listOf(preferredBackend) + PERSISTENCE_BACKENDS.filter { it != preferredBackend }
 }
 
 private fun MetadataSyncCoordinator.waitForKernelRestore(

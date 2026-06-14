@@ -2525,8 +2525,14 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 	u64 pub_digits[ECC_MAX_DIGITS * 2] = {};
 	int ret;
 	u8 flags = ABK_FIDO_CRED_FLAG_UP;
+	bool is_dummy = abk_fido_is_dummy_make_credential(req);
 
-	if (abk_fido_is_dummy_make_credential(req))
+	pr_info("abk_fido_key: makeCredential dummy_check rp=%s user=%s result=%u\n",
+		req->rp_id[0] ? req->rp_id : "<empty>",
+		req->user_name[0] ? req->user_name : "<empty>",
+		is_dummy);
+
+	if (is_dummy)
 		return abk_fido_make_dummy_credential_resp(req, payload, payload_len);
 
 	mutex_lock(&abk_fido_dev.lock);
@@ -4125,6 +4131,8 @@ EXPORT_SYMBOL_GPL(abk_fido_key_release_config);
 static int __init abk_fido_core_init(void)
 {
 	int ret;
+
+	pr_info("abk_fido_key: build marker dummy-mc-v2\n");
 
 	abk_fido_dev.kobj = kobject_create_and_add("abk_fido_key", kernel_kobj);
 	if (!abk_fido_dev.kobj)

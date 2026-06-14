@@ -1,12 +1,12 @@
 <resources>
     <string name="app_name">ABK FIDO Companion</string>
-    <string name="status_syncing">Syncing FIDO store with /metadata…</string>
-    <string name="status_root_missing">Root is unavailable. Metadata sync was skipped.</string>
+    <string name="status_syncing">Syncing FIDO store with the active persistence backend…</string>
+    <string name="status_root_missing">Root is unavailable. FIDO persistence sync was skipped.</string>
     <string name="status_success_prefix">Sync finished: </string>
     <string name="status_failure_prefix">Sync failed: </string>
     <string name="service_channel_name">ABK FIDO Sync</string>
     <string name="service_title">ABK FIDO Companion</string>
-    <string name="service_text">Synchronizing FIDO metadata persistence</string>
+    <string name="service_text">Synchronizing FIDO persisted store state</string>
     <string name="auth_prompt_title">ABK FIDO Verification</string>
     <string name="auth_prompt_subtitle">Approve security key access for %1$s</string>
     <string name="auth_biometric_unavailable">No biometric verification available. FIDO request rejected.</string>

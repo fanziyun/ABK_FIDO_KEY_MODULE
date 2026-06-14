@@ -30,6 +30,10 @@ private data class PersistedBlob(
     val bytes: ByteArray,
 )
 
+private data class PersistedDatabase(
+    val backend: PersistenceBackend,
+)
+
 private val PERSISTENCE_BACKENDS = listOf(
     PersistenceBackend(
         name = "metadata",
@@ -87,6 +91,7 @@ internal class MetadataSyncCoordinator(context: Context) {
             var activeBackend = importDatabase()
             if (activeBackend != null) {
                 notes += "imported sqlite mirror from ${activeBackend.dbPath}"
+                notes += "active_backend=${activeBackend.name}"
             } else {
                 notes += "persistent sqlite mirror not found"
             }
@@ -101,6 +106,7 @@ internal class MetadataSyncCoordinator(context: Context) {
             when {
                 persistedBlob != null -> {
                     activeBackend = persistedBlob.backend
+                    notes += "active_backend=${persistedBlob.backend.name}"
                     localBlob = syncSnapshot(
                         repository = repository,
                         currentBlob = localBlob,
@@ -128,6 +134,7 @@ internal class MetadataSyncCoordinator(context: Context) {
                 }
                 localBlob != null -> {
                     val preferredBackend = activeBackend ?: PERSISTENCE_BACKENDS.last()
+                    notes += "active_backend=${preferredBackend.name}"
                     val targetCount = localBlob.storeCredentialCount()
                     if (targetCount < 0) {
                         return SyncResult(false, notes + "local sqlite snapshot malformed")
@@ -160,6 +167,7 @@ internal class MetadataSyncCoordinator(context: Context) {
                 return SyncResult(false, notes + "failed to export sqlite mirror to persistent storage")
             }
             notes += "exported sqlite mirror to ${exportDbBackend.dbPath}"
+            notes += "sqlite_backend=${exportDbBackend.name}"
             return SyncResult(true, notes)
         }
     }
@@ -209,6 +217,7 @@ private fun MetadataSyncCoordinator.restoreKernelFromBlob(
         return SyncResult(false, notes + "failed to write restore blob to persistent storage")
     }
     notes += "exported restore blob to ${exportBackend.blobPath}"
+    notes += "blob_backend=${exportBackend.name}"
 
     val generationBefore = FidoKernelBridge.readStoreGeneration()
     notes += "generation_before=${generationBefore ?: -1}"

@@ -3,8 +3,6 @@ package com.abk.extension.fido
 import com.topjohnwu.superuser.Shell
 
 internal object RootShell {
-    private const val BOOT_SCRIPT_PATH = "/data/adb/service.d/abk-fido-companion.sh"
-
     data class CommandResult(
         val exitCode: Int,
         val stdout: String,
@@ -110,36 +108,6 @@ internal object RootShell {
             am start -n 'com.abk.kernel/com.abk.kernel.extensions.AbkExtensionManagerActivity' \
               --es 'com.abk.kernel.extra.EXTENSION_ID' 'abk_fido_store' \
               --ez 'bootstrap_mode' 'true'
-            """.trimIndent()
-        )
-    }
-
-    fun ensureBootStartScript(): CommandResult {
-        val scriptBody = """
-            #!/system/bin/sh
-            (
-              i=0
-              while [ "${'$'}i" -lt 120 ]; do
-                if /system/bin/cmd user is-user-unlocked 0 2>/dev/null | /system/bin/grep -qi true; then
-                  /system/bin/am start-foreground-service -n com.abk.extension.fido/.FidoSyncService --es reason service_d_boot >/dev/null 2>&1
-                  exit 0
-                fi
-                i=$((i + 1))
-                /system/bin/sleep 5
-              done
-            ) &
-        """.trimIndent()
-        return run(
-            """
-            set -e
-            dir='/data/adb/service.d'
-            dst=${shellQuote(BOOT_SCRIPT_PATH)}
-            mkdir -p "${'$'}dir"
-            cat > "${'$'}dst" <<'EOF'
-            $scriptBody
-            EOF
-            chmod 0755 "${'$'}dst"
-            restorecon "${'$'}dst" 2>/dev/null || true
             """.trimIndent()
         )
     }

@@ -39,7 +39,7 @@
                 android:value=".FidoBootstrapActivity" />
             <meta-data
                 android:name="com.abk.kernel.extension.SERVICE_ACTIVITY"
-                android:value=".FidoBootstrapActivity" />
+                android:value=".FidoSyncService" />
         </activity>
 
         <activity

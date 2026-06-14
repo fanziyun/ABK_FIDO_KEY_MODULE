@@ -33,8 +33,8 @@ What it adds / 它会增加这些内容:
 
 - `setup.sh`: external module entrypoint used by the ABK build hook.
 - `module.conf`: module metadata, version, and supported stages.
-- `scripts/`: helper shell and Python patch scripts, including the SELinux
-  hooks patcher used during external-module injection.
+- `scripts/`: helper shell and Python patch scripts, including the KernelSU
+  SELinux policy patcher used during external-module injection.
 - `files/drivers/abk_fido_key/`: kernel driver source, Kconfig, and Makefile.
 - `files/include/linux/abk_fido_key.h`: public kernel header used by the
   configfs injection point.
@@ -91,7 +91,7 @@ Then rebuild:
 
 - `after_patch`: install kernel files and patch
   `common/drivers/usb/gadget/configfs.c` plus
-  `common/security/selinux/hooks.c`.
+  `common/drivers/kernelsu/selinux/rules.c`.
 - `before_build`: do everything from `after_patch`, then enable the required
   `CONFIG_ABK_FIDO_KEY*` symbols in `DEFCONFIG`, including the metadata
   persistence toggle.
@@ -123,12 +123,12 @@ assembled.
 - Supports CTAP HID `INIT`, `PING`, `WINK`, `CBOR`, and `CANCEL`.
 - Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `clientPIN`
   (minimal), `reset`, and `selection`.
-- Persists the kernel-side FIDO store blob under `/metadata/abk_fido_store.bin`
-  when policy allows it, and falls back through `/data/adb`,
-  `/mnt/vendor/persist`, and `/data/local/tmp` when kernel-domain SELinux
-  policy blocks the earlier paths.
+- Persists the kernel-side FIDO store blob at `/metadata/abk_fido_store.bin`.
+- During build injection, the module patches KernelSU SELinux policy setup so
+  the `kernel` domain can access that metadata blob without switching SELinux
+  to permissive mode.
 - The companion app mirrors the active blob into a SQLite database and keeps
-  the SQLite mirror alongside the active blob path.
+  the SQLite mirror in `/metadata/abk_fido.db`.
 
 ## Validation / 验证方式
 
@@ -139,17 +139,12 @@ After a successful build and boot, check:
 - `/sys/kernel/abk_fido_key/hid_dev` reports a `hidgX` device name
 - `/sys/kernel/abk_fido_key/bound` becomes `1` after the gadget is bound
 - `/dev/hidgX` exists for packet-level debugging
-- after a credential or PIN change, one of these exists:
-  `/metadata/abk_fido_store.bin`, `/data/adb/abk_fido_store.bin`,
-  `/mnt/vendor/persist/abk_fido_store.bin`, or
-  `/data/local/tmp/abk_fido_store.bin`
+- after a credential or PIN change, `/metadata/abk_fido_store.bin` exists
 - writing `1` to `/sys/kernel/abk_fido_key/restore_metadata` increments
   `store_generation` and restores the expected `credential_count`
 - `/sys/kernel/abk_fido_key/last_error` is empty after a successful restore
-- `/sys/kernel/abk_fido_key/last_trace` reports which persistence path was
-  used for restore
-- after the companion app sync runs, the matching SQLite mirror exists beside
-  the active blob path
+- `/sys/kernel/abk_fido_key/last_trace` reports the metadata restore path
+- after the companion app sync runs, `/metadata/abk_fido.db` exists
 
 ## GitHub Release Automation / GitHub 自动发布
 
@@ -184,10 +179,9 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
   credential-management extensions.
 - The kernel blob is the immediate source of truth for runtime state; the
   companion SQLite database is a mirrored persistence layer that syncs through
-  the active persisted blob path (`/metadata` first, then `/data/adb`,
-  `/mnt/vendor/persist`, `/data/local/tmp`) rather than in-kernel SQLite.
-- If the companion app cannot obtain root, the SQLite mirror will not be
-  refreshed, but the kernel blob on the active persistence backend still
+  `/metadata/abk_fido_store.bin` rather than in-kernel SQLite.
+- If the companion app cannot obtain root, `/metadata/abk_fido.db` will not be
+  refreshed, but the kernel blob at `/metadata/abk_fido_store.bin` still
   remains the primary persistent store.
 - The configfs patcher depends on specific anchors in
   `common/drivers/usb/gadget/configfs.c`; if the kernel tree diverges, the

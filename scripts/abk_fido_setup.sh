@@ -26,15 +26,15 @@ abk_fido_patch_usb_gadget() {
   python3 "$MODULE_DIR/scripts/patch_configfs_for_abk_fido.py" "$configfs"
 }
 
-abk_fido_patch_selinux() {
-  local common_dir hooks
+abk_fido_patch_kernelsu_sepolicy() {
+  local common_dir rules
   common_dir="$(abk_common_dir)"
-  hooks="$common_dir/security/selinux/hooks.c"
+  rules="$common_dir/drivers/kernelsu/selinux/rules.c"
 
-  abk_require_file "$hooks"
-  python3 "$MODULE_DIR/scripts/patch_selinux_for_abk_fido.py" "$hooks"
-  grep -q '"file_path_has_perm"' "$hooks" || abk_die "ABK FIDO SELinux patch missing file_path_has_perm bypass"
-  grep -q '"file_permission"' "$hooks" || abk_die "ABK FIDO SELinux patch missing file_permission bypass"
+  abk_require_file "$rules"
+  python3 "$MODULE_DIR/scripts/patch_kernelsu_sepolicy_for_abk_fido.py" "$rules"
+  grep -q "ABK FIDO: allow kernel domain access to the persisted metadata store." "$rules" \
+    || abk_die "ABK FIDO KernelSU sepolicy patch missing metadata_file allow rules"
 }
 
 abk_fido_enable_config() {

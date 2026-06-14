@@ -60,10 +60,7 @@
 #define ABK_FIDO_MAX_CBOR			1536
 #define ABK_FIDO_MAX_SIG_DER			80
 #define ABK_FIDO_AUTH_CACHE_MS			10000
-#define ABK_FIDO_STORE_PATH_METADATA		"/metadata/abk_fido_store.bin"
-#define ABK_FIDO_STORE_PATH_ADB		"/data/adb/abk_fido_store.bin"
-#define ABK_FIDO_STORE_PATH_VENDOR_PERSIST	"/mnt/vendor/persist/abk_fido_store.bin"
-#define ABK_FIDO_STORE_PATH_TMP		"/data/local/tmp/abk_fido_store.bin"
+#define ABK_FIDO_STORE_PATH			"/metadata/abk_fido_store.bin"
 #define ABK_FIDO_STORE_MAGIC			0x41424646
 #define ABK_FIDO_STORE_VERSION			1
 #define ABK_FIDO_PIN_RETRIES_DEFAULT		8
@@ -462,18 +459,6 @@ static struct usb_gadget_strings abk_fido_stringtab = {
 
 static struct usb_gadget_strings *abk_fido_func_strings[] = {
 	&abk_fido_stringtab,
-	NULL,
-};
-
-static const char * const abk_fido_store_paths[] = {
-#if IS_ENABLED(CONFIG_ABK_FIDO_KEY_PERSIST_METADATA)
-	ABK_FIDO_STORE_PATH_METADATA,
-#endif
-#if IS_ENABLED(CONFIG_ABK_FIDO_KEY_PERSIST_ADB_DATA)
-	ABK_FIDO_STORE_PATH_ADB,
-#endif
-	ABK_FIDO_STORE_PATH_VENDOR_PERSIST,
-	ABK_FIDO_STORE_PATH_TMP,
 	NULL,
 };
 
@@ -1510,12 +1495,8 @@ static int abk_fido_init_new_store_locked(void)
 
 static int abk_fido_load_store_locked(void)
 {
-	const char * const *pathp;
 	int ret = -ENOENT;
-	int best_ret = -ENOENT;
 	char reason[96] = "";
-	char best_reason[96] = "";
-	char success_trace[160];
 
 	if (abk_fido_dev.store_loaded)
 		return 0;
@@ -1525,42 +1506,35 @@ static int abk_fido_load_store_locked(void)
 		return abk_fido_init_new_store_locked();
 	}
 
-	for (pathp = abk_fido_store_paths; *pathp; pathp++) {
-		pr_info("abk_fido_key: store load trying %s\n", *pathp);
-		ret = abk_fido_read_store_from_path_locked(
-			*pathp, &abk_fido_dev.store, reason, sizeof(reason));
-		if (!ret) {
-			pr_info("abk_fido_key: store load succeeded from %s\n", *pathp);
-			scnprintf(success_trace, sizeof(success_trace),
-				  "store loaded from %s", *pathp);
-			abk_fido_finalize_restored_store_locked(success_trace);
-			abk_fido_dev.store_loaded = true;
-			abk_fido_dev.store_generation++;
-			return 0;
-		}
-		pr_warn("abk_fido_key: store load failed path=%s ret=%d reason=%s\n",
-			*pathp, ret, reason[0] ? reason : "unknown");
-		if (!best_reason[0] || best_ret == -ENOENT || ret != -ENOENT) {
-			best_ret = ret;
-			strscpy(best_reason, reason, sizeof(best_reason));
-		}
+	pr_info("abk_fido_key: store load trying %s\n", ABK_FIDO_STORE_PATH);
+	ret = abk_fido_read_store_from_path_locked(
+		ABK_FIDO_STORE_PATH, &abk_fido_dev.store, reason, sizeof(reason));
+	if (!ret) {
+		pr_info("abk_fido_key: store load succeeded from %s\n", ABK_FIDO_STORE_PATH);
+		abk_fido_finalize_restored_store_locked(
+			"store loaded from /metadata/abk_fido_store.bin");
+		abk_fido_dev.store_loaded = true;
+		abk_fido_dev.store_generation++;
+		return 0;
 	}
+	pr_warn("abk_fido_key: store load failed path=%s ret=%d reason=%s\n",
+		ABK_FIDO_STORE_PATH, ret, reason[0] ? reason : "unknown");
 
 	abk_fido_dev.store_loaded = true;
 	ret = abk_fido_init_new_store_locked();
 	if (ret)
 		return ret;
 
-	if (best_ret == -ENOENT) {
+	if (ret == -ENOENT) {
 		abk_fido_dev.last_error[0] = '\0';
 		abk_fido_set_last_trace_locked(
 			"no persisted store found, initialized new store");
 	} else {
 		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
-			 "%s, reinitialized", best_reason[0] ? best_reason :
+			 "%s, reinitialized", reason[0] ? reason :
 			 "store blob invalid");
 		abk_fido_set_last_trace_locked("store load failed: %s",
-			best_reason[0] ? best_reason : "store blob invalid");
+			reason[0] ? reason : "store blob invalid");
 	}
 	abk_fido_dev.store_generation++;
 	return 0;
@@ -1569,12 +1543,8 @@ static int abk_fido_load_store_locked(void)
 static int abk_fido_maybe_persist_locked(void)
 {
 	struct abk_fido_store_disk *disk;
-	const char * const *pathp;
 	int ret = 0;
-	int best_ret = -ENOENT;
 	char reason[96] = "";
-	char best_reason[96] = "";
-	char trace[160];
 
 	if (!abk_fido_dev.store_dirty)
 		return 0;
@@ -1590,37 +1560,31 @@ static int abk_fido_maybe_persist_locked(void)
 
 	abk_fido_store_to_disk(disk);
 
-	for (pathp = abk_fido_store_paths; *pathp; pathp++) {
-		pr_info("abk_fido_key: persist trying %s\n", *pathp);
-		ret = abk_fido_write_store_to_path_locked(
-			*pathp, disk, reason, sizeof(reason));
-		if (!ret) {
-			pr_info("abk_fido_key: persist succeeded to %s\n", *pathp);
-			abk_fido_dev.store_dirty = false;
-			abk_fido_dev.store_generation++;
-			abk_fido_dev.last_error[0] = '\0';
-			scnprintf(trace, sizeof(trace), "persisted store to %s", *pathp);
-			abk_fido_set_last_trace_locked("%s", trace);
-			kfree(disk);
-			return 0;
-		}
-		pr_warn("abk_fido_key: persist failed path=%s ret=%d reason=%s\n",
-			*pathp, ret, reason[0] ? reason : "unknown");
-		if (!best_reason[0] || best_ret == -ENOENT || ret != -ENOENT) {
-			best_ret = ret;
-			strscpy(best_reason, reason, sizeof(best_reason));
-		}
+	pr_info("abk_fido_key: persist trying %s\n", ABK_FIDO_STORE_PATH);
+	ret = abk_fido_write_store_to_path_locked(
+		ABK_FIDO_STORE_PATH, disk, reason, sizeof(reason));
+	if (!ret) {
+		pr_info("abk_fido_key: persist succeeded to %s\n", ABK_FIDO_STORE_PATH);
+		abk_fido_dev.store_dirty = false;
+		abk_fido_dev.store_generation++;
+		abk_fido_dev.last_error[0] = '\0';
+		abk_fido_set_last_trace_locked("persisted store to %s",
+			ABK_FIDO_STORE_PATH);
+		kfree(disk);
+		return 0;
 	}
+	pr_warn("abk_fido_key: persist failed path=%s ret=%d reason=%s\n",
+		ABK_FIDO_STORE_PATH, ret, reason[0] ? reason : "unknown");
 
 defer_persist:
 	kfree(disk);
 	abk_fido_dev.store_dirty = false;
 	abk_fido_dev.store_generation++;
-	if (best_reason[0]) {
+	if (reason[0]) {
 		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
-			 "%s", best_reason);
-		abk_fido_set_last_trace_locked("persist deferred: %s", best_reason);
-		pr_info("abk_fido_key: persist deferred: %s\n", best_reason);
+			 "%s", reason);
+		abk_fido_set_last_trace_locked("persist deferred: %s", reason);
+		pr_info("abk_fido_key: persist deferred: %s\n", reason);
 	} else {
 		abk_fido_set_last_trace_locked("persist deferred: no store path available");
 		pr_info("abk_fido_key: persist deferred: no store path available\n");
@@ -1707,11 +1671,8 @@ out:
 static int abk_fido_restore_persisted_store_locked(const char *source)
 {
 	struct abk_fido_store *new_store;
-	const char * const *pathp;
 	int ret = -ENOENT;
-	int best_ret = -ENOENT;
 	char reason[96] = "";
-	char best_reason[96] = "";
 	char success_trace[160];
 
 	new_store = kzalloc(sizeof(*new_store), GFP_KERNEL);
@@ -1723,39 +1684,33 @@ static int abk_fido_restore_persisted_store_locked(const char *source)
 		return ret;
 	}
 
-	for (pathp = abk_fido_store_paths; *pathp; pathp++) {
-		pr_info("abk_fido_key: restore source=%s trying %s\n",
-			source, *pathp);
-		ret = abk_fido_read_store_from_path_locked(
-			*pathp, new_store, reason, sizeof(reason));
-		if (!ret) {
-			pr_info("abk_fido_key: restore source=%s succeeded from %s\n",
-				source, *pathp);
-			memcpy(&abk_fido_dev.store, new_store, sizeof(*new_store));
-			abk_fido_dev.store_loaded = true;
-			scnprintf(success_trace, sizeof(success_trace),
-				  "store restored from %s via %s", *pathp, source);
-			abk_fido_finalize_restored_store_locked(success_trace);
-			abk_fido_dev.store_generation++;
-			kfree(new_store);
-			return 0;
-		}
-		pr_warn("abk_fido_key: restore source=%s failed path=%s ret=%d reason=%s\n",
-			source, *pathp, ret, reason[0] ? reason : "unknown");
-		if (!best_reason[0] || best_ret == -ENOENT || ret != -ENOENT) {
-			best_ret = ret;
-			strscpy(best_reason, reason, sizeof(best_reason));
-		}
+	pr_info("abk_fido_key: restore source=%s trying %s\n",
+		source, ABK_FIDO_STORE_PATH);
+	ret = abk_fido_read_store_from_path_locked(
+		ABK_FIDO_STORE_PATH, new_store, reason, sizeof(reason));
+	if (!ret) {
+		pr_info("abk_fido_key: restore source=%s succeeded from %s\n",
+			source, ABK_FIDO_STORE_PATH);
+		memcpy(&abk_fido_dev.store, new_store, sizeof(*new_store));
+		abk_fido_dev.store_loaded = true;
+		scnprintf(success_trace, sizeof(success_trace),
+			  "store restored from %s via %s", ABK_FIDO_STORE_PATH, source);
+		abk_fido_finalize_restored_store_locked(success_trace);
+		abk_fido_dev.store_generation++;
+		kfree(new_store);
+		return 0;
 	}
+	pr_warn("abk_fido_key: restore source=%s failed path=%s ret=%d reason=%s\n",
+		source, ABK_FIDO_STORE_PATH, ret, reason[0] ? reason : "unknown");
 
 	snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
-		 "%s", best_reason[0] ? best_reason :
+		 "%s", reason[0] ? reason :
 		 "no persisted store available");
 	abk_fido_set_last_trace_locked("%s restore failed: %s",
-		source, best_reason[0] ? best_reason :
+		source, reason[0] ? reason :
 		"no persisted store available");
 	kfree(new_store);
-	return best_ret;
+	return ret;
 }
 
 static int abk_fido_write_store_to_path_locked(const char *path,

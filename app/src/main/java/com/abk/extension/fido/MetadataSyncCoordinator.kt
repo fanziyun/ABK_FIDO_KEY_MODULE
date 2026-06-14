@@ -8,12 +8,6 @@ import java.io.File
 private const val LOCAL_DB_NAME = "abk_fido.db"
 private const val METADATA_DB_PATH = "/metadata/abk_fido.db"
 private const val METADATA_BLOB_PATH = "/metadata/abk_fido_store.bin"
-private const val ADB_DB_PATH = "/data/adb/abk_fido.db"
-private const val ADB_BLOB_PATH = "/data/adb/abk_fido_store.bin"
-private const val VENDOR_PERSIST_DB_PATH = "/mnt/vendor/persist/abk_fido.db"
-private const val VENDOR_PERSIST_BLOB_PATH = "/mnt/vendor/persist/abk_fido_store.bin"
-private const val TMP_DB_PATH = "/data/local/tmp/abk_fido.db"
-private const val TMP_BLOB_PATH = "/data/local/tmp/abk_fido_store.bin"
 private const val STORE_DISK_HEADER_SIZE = 84
 private const val STORE_DISK_CRED_SIZE = 452
 private const val STORE_DISK_MAX_CREDS = 32
@@ -39,21 +33,6 @@ private val PERSISTENCE_BACKENDS = listOf(
         name = "metadata",
         blobPath = METADATA_BLOB_PATH,
         dbPath = METADATA_DB_PATH,
-    ),
-    PersistenceBackend(
-        name = "adb",
-        blobPath = ADB_BLOB_PATH,
-        dbPath = ADB_DB_PATH,
-    ),
-    PersistenceBackend(
-        name = "vendor_persist",
-        blobPath = VENDOR_PERSIST_BLOB_PATH,
-        dbPath = VENDOR_PERSIST_DB_PATH,
-    ),
-    PersistenceBackend(
-        name = "local_tmp",
-        blobPath = TMP_BLOB_PATH,
-        dbPath = TMP_DB_PATH,
     ),
 )
 

@@ -33,6 +33,8 @@ abk_fido_patch_selinux() {
 
   abk_require_file "$hooks"
   python3 "$MODULE_DIR/scripts/patch_selinux_for_abk_fido.py" "$hooks"
+  grep -q '"file_path_has_perm"' "$hooks" || abk_die "ABK FIDO SELinux patch missing file_path_has_perm bypass"
+  grep -q '"file_permission"' "$hooks" || abk_die "ABK FIDO SELinux patch missing file_permission bypass"
 }
 
 abk_fido_enable_config() {

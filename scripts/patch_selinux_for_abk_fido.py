@@ -49,8 +49,8 @@ def main() -> int:
     updated = inject_once(updated, MAY_CREATE_NEEDLE, MAY_CREATE_BLOCK, "op=may_create", path)
     updated = inject_once(updated, INODE_PERMISSION_NEEDLE, INODE_PERMISSION_BLOCK, "inode_permission\"", path)
     updated = inject_once(updated, INODE_SETATTR_NEEDLE, INODE_SETATTR_BLOCK, "op=inode_setattr", path)
-    updated = inject_once(updated, FILE_PATH_HAS_PERM_NEEDLE, FILE_PATH_HAS_PERM_BLOCK, "file_path_has_perm", path)
-    updated = inject_once(updated, FILE_PERMISSION_NEEDLE, FILE_PERMISSION_BLOCK, "file_permission", path)
+    updated = inject_once(updated, FILE_PATH_HAS_PERM_NEEDLE, FILE_PATH_HAS_PERM_BLOCK, "\"file_path_has_perm\"", path)
+    updated = inject_once(updated, FILE_PERMISSION_NEEDLE, FILE_PERMISSION_BLOCK, "\"file_permission\"", path)
 
     if updated != text:
         path.write_text(updated)

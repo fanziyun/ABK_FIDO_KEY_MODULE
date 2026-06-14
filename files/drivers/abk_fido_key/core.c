@@ -2217,6 +2217,14 @@ static int abk_fido_parse_make_cred(const u8 *buf, size_t len,
 		}
 	}
 
+	pr_info("abk_fido_key: parsed makeCredential rp=%s user_name=%s user_display=%s user_id_len=%u exclude=%u rk=%u uv=%u\n",
+		req->rp_id[0] ? req->rp_id : "<empty>",
+		req->user_name[0] ? req->user_name : "<empty>",
+		req->user_display[0] ? req->user_display : "<empty>",
+		req->user_id_len,
+		req->exclude_count,
+		req->rk,
+		req->uv);
 	return (req->have_client_data_hash && req->have_rp_id && req->have_user_id) ? 0 : -EINVAL;
 }
 

@@ -13,6 +13,7 @@ private const val STORE_BLOB_PATH = "$SYSFS_BASE/store_blob"
 private const val STORE_GENERATION_PATH = "$SYSFS_BASE/store_generation"
 private const val CREDENTIAL_COUNT_PATH = "$SYSFS_BASE/credential_count"
 private const val RELOAD_STORE_PATH = "$SYSFS_BASE/reload_store"
+private const val RESTORE_METADATA_PATH = "$SYSFS_BASE/restore_metadata"
 private const val TAG = "AbkFidoCompanion"
 
 internal data class PendingAuthRequest(
@@ -81,9 +82,6 @@ internal object FidoKernelBridge {
     fun readStoreBlobBase64(): RootShell.CommandResult =
         RootShell.readFileBase64(STORE_BLOB_PATH)
 
-    fun writeStoreBlobBase64(payloadBase64: String): RootShell.CommandResult =
-        RootShell.writeSysfsBlobBase64(STORE_BLOB_PATH, payloadBase64)
-
     fun readCredentialCount(): Int? =
         RootShell.readTextFile(CREDENTIAL_COUNT_PATH).stdout.trim().toIntOrNull()
 
@@ -92,6 +90,9 @@ internal object FidoKernelBridge {
 
     fun reloadStore(): RootShell.CommandResult =
         RootShell.writeTextFile(RELOAD_STORE_PATH, "1\n")
+
+    fun restoreMetadata(): RootShell.CommandResult =
+        RootShell.writeTextFile(RESTORE_METADATA_PATH, "1\n")
 
     fun waitForCredentialCountAtLeast(target: Int, attempts: Int = 20, delayMs: Long = 200): Int? {
         repeat(attempts) {

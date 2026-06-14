@@ -463,9 +463,14 @@ static struct usb_gadget_strings *abk_fido_func_strings[] = {
 };
 
 static void abk_fido_set_last_trace_locked(const char *fmt, ...);
-static int abk_fido_store_from_disk(struct abk_fido_store_disk *disk);
+static int abk_fido_store_from_disk_into(struct abk_fido_store_disk *disk,
+					 struct abk_fido_store *store,
+					 char *reason, size_t reason_len);
 static void abk_fido_store_to_disk(struct abk_fido_store_disk *disk);
+static void abk_fido_finalize_restored_store_locked(const char *success_trace);
 static int abk_fido_load_store_locked(void);
+static int abk_fido_restore_store_from_path_locked(const char *path,
+						   const char *source);
 
 enum {
 	ABK_FIDO_STRING_INTERFACE = 0,
@@ -654,6 +659,7 @@ static ssize_t abk_fido_store_blob_write(struct file *filp, struct kobject *kobj
 	struct abk_fido_store_disk *disk;
 	size_t size = sizeof(*disk);
 	int ret;
+	char reason[96] = "";
 
 	if (off < 0 || off >= size || count > size - off)
 		return -EINVAL;
@@ -674,13 +680,22 @@ static ssize_t abk_fido_store_blob_write(struct file *filp, struct kobject *kobj
 
 	if (abk_fido_dev.store_blob_staging_len == size) {
 		disk = (struct abk_fido_store_disk *)abk_fido_dev.store_blob_staging;
-		ret = abk_fido_store_from_disk(disk);
+		ret = abk_fido_store_from_disk_into(disk, &abk_fido_dev.store,
+						    reason, sizeof(reason));
 		if (!ret) {
 			abk_fido_dev.store_loaded = true;
-			abk_fido_dev.store_dirty = false;
 			abk_fido_dev.store_generation++;
-			abk_fido_set_last_trace_locked("store blob restored from userspace");
+			abk_fido_finalize_restored_store_locked(
+				"store blob restored from userspace");
 			pr_info("abk_fido_key: store blob restored from userspace\n");
+		} else {
+			snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+				 "%s", reason[0] ? reason :
+				 "store blob restore failed");
+			abk_fido_set_last_trace_locked("store blob restore failed: %s",
+				reason[0] ? reason : "validation failed");
+			pr_warn("abk_fido_key: store blob restore failed: %s\n",
+				reason[0] ? reason : "validation failed");
 		}
 		kvfree(abk_fido_dev.store_blob_staging);
 		abk_fido_dev.store_blob_staging = NULL;
@@ -1328,32 +1343,47 @@ static void abk_fido_set_last_trace_locked(const char *fmt, ...)
 	va_end(args);
 }
 
-static int abk_fido_store_from_disk(struct abk_fido_store_disk *disk)
+static int abk_fido_store_from_disk_into(struct abk_fido_store_disk *disk,
+					 struct abk_fido_store *store,
+					 char *reason, size_t reason_len)
 {
 	unsigned int i;
 	u32 crc;
 
-	if (le32_to_cpu(disk->magic) != ABK_FIDO_STORE_MAGIC)
+	if (le32_to_cpu(disk->magic) != ABK_FIDO_STORE_MAGIC) {
+		if (reason && reason_len)
+			scnprintf(reason, reason_len, "invalid store magic 0x%x",
+				  le32_to_cpu(disk->magic));
 		return -EINVAL;
-	if (le32_to_cpu(disk->version) != ABK_FIDO_STORE_VERSION)
+	}
+	if (le32_to_cpu(disk->version) != ABK_FIDO_STORE_VERSION) {
+		if (reason && reason_len)
+			scnprintf(reason, reason_len, "invalid store version %u",
+				  le32_to_cpu(disk->version));
 		return -EINVAL;
+	}
 
 	crc = crc32_le(0, (u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count),
 		       sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count));
-	if (crc != le32_to_cpu(disk->crc32))
+	if (crc != le32_to_cpu(disk->crc32)) {
+		if (reason && reason_len)
+			scnprintf(reason, reason_len,
+				  "invalid store crc stored=0x%08x calc=0x%08x",
+				  le32_to_cpu(disk->crc32), crc);
 		return -EILSEQ;
+	}
 
-	memset(&abk_fido_dev.store, 0, sizeof(abk_fido_dev.store));
-	abk_fido_dev.store.sign_count = le32_to_cpu(disk->sign_count);
-	memcpy(abk_fido_dev.store.aaguid, disk->aaguid, sizeof(disk->aaguid));
-	abk_fido_dev.store.pin_set = disk->pin_set;
-	abk_fido_dev.store.pin_retries = disk->pin_retries;
-	memcpy(abk_fido_dev.store.pin_hash, disk->pin_hash, sizeof(disk->pin_hash));
-	memcpy(abk_fido_dev.store.pin_token, disk->pin_token, sizeof(disk->pin_token));
+	memset(store, 0, sizeof(*store));
+	store->sign_count = le32_to_cpu(disk->sign_count);
+	memcpy(store->aaguid, disk->aaguid, sizeof(disk->aaguid));
+	store->pin_set = disk->pin_set;
+	store->pin_retries = disk->pin_retries;
+	memcpy(store->pin_hash, disk->pin_hash, sizeof(disk->pin_hash));
+	memcpy(store->pin_token, disk->pin_token, sizeof(disk->pin_token));
 
 	for (i = 0; i < ABK_FIDO_MAX_CREDS; i++) {
 		struct abk_fido_store_disk_cred *dc = &disk->creds[i];
-		struct abk_fido_credential *sc = &abk_fido_dev.store.creds[i];
+		struct abk_fido_credential *sc = &store->creds[i];
 
 		sc->in_use = !!dc->in_use;
 		sc->resident = !!dc->resident;
@@ -1408,6 +1438,26 @@ static void abk_fido_store_to_disk(struct abk_fido_store_disk *disk)
 	disk->crc32 = cpu_to_le32(crc);
 }
 
+static void abk_fido_finalize_restored_store_locked(const char *success_trace)
+{
+	abk_fido_dev.store_dirty = false;
+	abk_fido_dev.last_error[0] = '\0';
+
+	if (abk_fido_dev.store.pin_set &&
+	    !abk_fido_pin_configured_locked()) {
+		abk_fido_dev.store.pin_set = false;
+		abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
+		abk_fido_dev.store_dirty = true;
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "invalid pin state recovered");
+		abk_fido_set_last_trace_locked(
+			"%s; cleared invalid pin state", success_trace);
+		return;
+	}
+
+	abk_fido_set_last_trace_locked("%s", success_trace);
+}
+
 static int abk_fido_init_new_store_locked(void)
 {
 	memset(&abk_fido_dev.store, 0, sizeof(abk_fido_dev.store));
@@ -1424,6 +1474,7 @@ static int abk_fido_load_store_locked(void)
 	struct abk_fido_store_disk *disk;
 	loff_t pos = 0;
 	ssize_t ret;
+	char reason[96] = "";
 
 	if (abk_fido_dev.store_loaded)
 		return 0;
@@ -1450,30 +1501,30 @@ static int abk_fido_load_store_locked(void)
 	if (ret != sizeof(*disk)) {
 		kfree(disk);
 		abk_fido_dev.store_loaded = true;
-		return abk_fido_init_new_store_locked();
+		ret = abk_fido_init_new_store_locked();
+		if (!ret)
+			abk_fido_set_last_trace_locked(
+				"store load short read from %s, initialized new store",
+				ABK_FIDO_STORE_PATH);
+		return ret;
 	}
 
-	ret = abk_fido_store_from_disk(disk);
+	ret = abk_fido_store_from_disk_into(disk, &abk_fido_dev.store,
+					    reason, sizeof(reason));
 	kfree(disk);
 	if (ret) {
 		ret = abk_fido_init_new_store_locked();
 		if (ret)
 			return ret;
 		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
-			 "store blob invalid, reinitialized");
+			 "%s, reinitialized", reason[0] ? reason :
+			 "store blob invalid");
+		abk_fido_set_last_trace_locked("store load failed: %s",
+			reason[0] ? reason : "store blob invalid");
 		ret = 0;
 	} else {
-		abk_fido_dev.store_dirty = false;
-		if (abk_fido_dev.store.pin_set &&
-		    !abk_fido_pin_configured_locked()) {
-			abk_fido_dev.store.pin_set = false;
-			abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
-			abk_fido_dev.store_dirty = true;
-			snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
-				 "invalid pin state recovered");
-			abk_fido_set_last_trace_locked(
-				"store recovery: cleared invalid pin state");
-		}
+		abk_fido_finalize_restored_store_locked(
+			"store loaded from /metadata/abk_fido_store.bin");
 	}
 	abk_fido_dev.store_loaded = true;
 	abk_fido_dev.store_generation++;
@@ -1541,9 +1592,74 @@ defer_persist:
 
 static int abk_fido_reload_store_locked(void)
 {
-	abk_fido_dev.store_loaded = false;
-	abk_fido_dev.store_dirty = false;
-	return abk_fido_load_store_locked();
+	return abk_fido_restore_store_from_path_locked(
+		ABK_FIDO_STORE_PATH, "reload_store");
+}
+
+static int abk_fido_restore_store_from_path_locked(const char *path,
+						   const char *source)
+{
+	struct file *file;
+	struct abk_fido_store_disk *disk = NULL;
+	struct abk_fido_store *new_store = NULL;
+	loff_t pos = 0;
+	ssize_t read_ret;
+	int ret = 0;
+	char reason[96] = "";
+	char success_trace[160];
+
+	file = abk_fido_filp_open_kernel(path, O_RDONLY, 0);
+	if (IS_ERR(file)) {
+		ret = PTR_ERR(file);
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "restore open %s failed: %d", path, ret);
+		abk_fido_set_last_trace_locked("%s restore open failed: %d",
+			source, ret);
+		return ret;
+	}
+
+	disk = kzalloc(sizeof(*disk), GFP_KERNEL);
+	new_store = kzalloc(sizeof(*new_store), GFP_KERNEL);
+	if (!disk || !new_store) {
+		ret = -ENOMEM;
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "restore alloc failed: %d", ret);
+		abk_fido_set_last_trace_locked("%s restore alloc failed", source);
+		goto out;
+	}
+
+	read_ret = abk_fido_kernel_read(file, disk, sizeof(*disk), &pos);
+	if (read_ret != sizeof(*disk)) {
+		ret = read_ret < 0 ? (int)read_ret : -EIO;
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "restore read %s failed: %d", path, ret);
+		abk_fido_set_last_trace_locked("%s restore read failed: %d",
+			source, ret);
+		goto out;
+	}
+
+	ret = abk_fido_store_from_disk_into(disk, new_store, reason, sizeof(reason));
+	if (ret) {
+		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
+			 "%s", reason[0] ? reason : "restore validation failed");
+		abk_fido_set_last_trace_locked("%s restore failed: %s",
+			source, reason[0] ? reason : "validation failed");
+		goto out;
+	}
+
+	memcpy(&abk_fido_dev.store, new_store, sizeof(*new_store));
+	abk_fido_dev.store_loaded = true;
+	scnprintf(success_trace, sizeof(success_trace),
+		  "store restored from %s via %s", path, source);
+	abk_fido_finalize_restored_store_locked(success_trace);
+	abk_fido_dev.store_generation++;
+	ret = 0;
+
+out:
+	filp_close(file, NULL);
+	kfree(new_store);
+	kfree(disk);
+	return ret;
 }
 
 static const char *abk_fido_ctap_name(u8 cmd)
@@ -3531,14 +3647,33 @@ static ssize_t reload_store_store(struct kobject *kobj, struct kobj_attribute *a
 {
 	(void)kobj;
 	(void)attr;
-	(void)buf;
 	int ret;
+
+	if (!(sysfs_streq(buf, "1") || sysfs_streq(buf, "reload") ||
+	      sysfs_streq(buf, "restore")))
+		return -EINVAL;
 
 	mutex_lock(&abk_fido_dev.lock);
 	ret = abk_fido_reload_store_locked();
-	if (ret)
-		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
-			 "reload failed: %d", ret);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret ? ret : count;
+}
+
+static ssize_t restore_metadata_store(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      const char *buf, size_t count)
+{
+	(void)kobj;
+	(void)attr;
+	int ret;
+
+	if (!(sysfs_streq(buf, "1") || sysfs_streq(buf, "restore") ||
+	      sysfs_streq(buf, "reload")))
+		return -EINVAL;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = abk_fido_restore_store_from_path_locked(
+		ABK_FIDO_STORE_PATH, "restore_metadata");
 	mutex_unlock(&abk_fido_dev.lock);
 	return ret ? ret : count;
 }
@@ -3655,6 +3790,7 @@ static struct kobj_attribute last_error_attr = __ATTR_RO(last_error);
 static struct kobj_attribute last_trace_attr = __ATTR_RO(last_trace);
 static struct kobj_attribute store_generation_attr = __ATTR_RO(store_generation);
 static struct kobj_attribute reload_store_attr = __ATTR_WO(reload_store);
+static struct kobj_attribute restore_metadata_attr = __ATTR_WO(restore_metadata);
 static struct kobj_attribute auth_gate_enabled_attr = __ATTR_RW(auth_gate_enabled);
 static struct kobj_attribute auth_pending_attr = __ATTR_RO(auth_pending);
 static struct kobj_attribute auth_request_id_attr = __ATTR_RO(auth_request_id);
@@ -3680,6 +3816,7 @@ static struct attribute *abk_fido_attrs[] = {
 	&last_trace_attr.attr,
 	&store_generation_attr.attr,
 	&reload_store_attr.attr,
+	&restore_metadata_attr.attr,
 	&auth_gate_enabled_attr.attr,
 	&auth_pending_attr.attr,
 	&auth_request_id_attr.attr,
@@ -3713,8 +3850,10 @@ static int abk_fido_control_run_command(const char *command, void *data)
 	mutex_lock(&abk_fido_dev.lock);
 	if (!strcmp(command, "reload") || !strcmp(command, "reload_store")) {
 		ret = abk_fido_reload_store_locked();
-		if (!ret)
-			abk_fido_dev.last_error[0] = '\0';
+	} else if (!strcmp(command, "restore") ||
+		   !strcmp(command, "restore_metadata")) {
+		ret = abk_fido_restore_store_from_path_locked(
+			ABK_FIDO_STORE_PATH, "abk_control");
 	} else if (!strcmp(command, "persist") || !strcmp(command, "persist_now")) {
 		ret = abk_fido_maybe_persist_locked();
 		if (!ret)
@@ -3736,7 +3875,7 @@ static int abk_fido_control_run_command(const char *command, void *data)
 		abk_fido_dev.store_dirty = true;
 		ret = abk_fido_maybe_persist_locked();
 	}
-	if (ret)
+	if (ret && !abk_fido_dev.last_error[0])
 		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
 			 "control command failed: %d", ret);
 	mutex_unlock(&abk_fido_dev.lock);

@@ -55,62 +55,54 @@ internal class MetadataSyncCoordinator(context: Context) {
             repository.ensureSchema()
 
             val kernelCredentialCount = FidoKernelBridge.readCredentialCount() ?: 0
-            val kernelBlobBytes = FidoKernelBridge.readStoreBlobBase64()
-                .takeIf { it.success }
-                ?.stdout
-                ?.let { raw -> runCatching { Base64.decode(raw, Base64.DEFAULT) }.getOrNull() }
             val metadataBlobBytes = RootShell.readFileBase64(METADATA_BLOB_PATH)
                 .takeIf { it.success }
                 ?.stdout
                 ?.let { raw -> runCatching { Base64.decode(raw, Base64.DEFAULT) }.getOrNull() }
-            val localBlob = repository.loadSnapshot()
+            var localBlob = repository.loadSnapshot()
 
-            if (kernelBlobBytes != null && kernelCredentialCount > 0) {
-                if (localBlob == null || !kernelBlobBytes.contentEquals(localBlob)) {
-                    repository.saveSnapshot(kernelBlobBytes)
-                    notes += "captured kernel blob into sqlite"
-                } else {
-                    notes += "sqlite snapshot already matches kernel blob"
-                }
-
-                val exportBlob = RootShell.writeFileBase64(
-                    path = METADATA_BLOB_PATH,
-                    payloadBase64 = Base64.encodeToString(kernelBlobBytes, Base64.NO_WRAP)
-                )
-                if (!exportBlob.success) {
-                    return SyncResult(false, notes + "failed to export kernel blob to /metadata")
-                }
-                notes += "exported kernel blob to /metadata"
-            } else {
-                val restoreBlob = metadataBlobBytes ?: localBlob
-                if (restoreBlob != null) {
-                    if (localBlob == null || !restoreBlob.contentEquals(localBlob)) {
-                        repository.saveSnapshot(restoreBlob)
-                        notes += "updated sqlite snapshot from restore blob"
+            when {
+                metadataBlobBytes != null -> {
+                    localBlob = syncSnapshot(repository, localBlob, metadataBlobBytes, "metadata", notes)
+                    val targetCount = metadataBlobBytes.storeCredentialCount()
+                    if (targetCount < 0) {
+                        return SyncResult(false, notes + "metadata blob malformed")
+                    }
+                    if (shouldRestoreKernel(kernelCredentialCount, targetCount)) {
+                        val restoreFailure = restoreKernelFromBlob(
+                            restoreBlob = metadataBlobBytes,
+                            targetCount = targetCount,
+                            notes = notes
+                        )
+                        if (restoreFailure != null) {
+                            return restoreFailure
+                        }
                     } else {
-                        notes += "sqlite snapshot already up to date"
+                        notes += "kernel already loaded(count=$kernelCredentialCount)"
                     }
-
-                    val targetCount = restoreBlob.storeCredentialCount()
-                    val restoreKernel = FidoKernelBridge.writeStoreBlobBase64(
-                        Base64.encodeToString(restoreBlob, Base64.NO_WRAP)
+                }
+                localBlob != null -> {
+                    val targetCount = localBlob.storeCredentialCount()
+                    if (targetCount < 0) {
+                        return SyncResult(false, notes + "local sqlite snapshot malformed")
+                    }
+                    if (kernelCredentialCount > 0) {
+                        return SyncResult(
+                            success = false,
+                            notes = notes + "metadata blob missing while kernel has credentials"
+                        )
+                    }
+                    notes += "metadata blob missing, restoring from sqlite snapshot"
+                    val restoreFailure = restoreKernelFromBlob(
+                        restoreBlob = localBlob,
+                        targetCount = targetCount,
+                        notes = notes
                     )
-                    if (restoreKernel.success) {
-                        val restoredCount = FidoKernelBridge.waitForCredentialCountAtLeast(targetCount)
-                        notes += "restored blob into kernel(count=${restoredCount ?: -1}/$targetCount)"
-                    } else {
-                        return SyncResult(false, notes + "kernel blob restore via sysfs failed")
+                    if (restoreFailure != null) {
+                        return restoreFailure
                     }
-
-                    val exportBlob = RootShell.writeFileBase64(
-                        path = METADATA_BLOB_PATH,
-                        payloadBase64 = Base64.encodeToString(restoreBlob, Base64.NO_WRAP)
-                    )
-                    if (!exportBlob.success) {
-                        return SyncResult(false, notes + "failed to export restore blob to /metadata")
-                    }
-                    notes += "exported restore blob to /metadata"
-                } else {
+                }
+                else -> {
                     notes += "no stored blob available"
                 }
             }
@@ -123,6 +115,126 @@ internal class MetadataSyncCoordinator(context: Context) {
             return SyncResult(true, notes)
         }
     }
+}
+
+private data class KernelRestoreObservation(
+    val generation: Int?,
+    val credentialCount: Int?,
+)
+
+private fun MetadataSyncCoordinator.syncSnapshot(
+    repository: StoreSnapshotRepository,
+    currentBlob: ByteArray?,
+    sourceBlob: ByteArray,
+    sourceLabel: String,
+    notes: MutableList<String>,
+): ByteArray {
+    return if (currentBlob == null || !sourceBlob.contentEquals(currentBlob)) {
+        repository.saveSnapshot(sourceBlob)
+        notes += "updated sqlite snapshot from $sourceLabel blob"
+        sourceBlob
+    } else {
+        notes += "sqlite snapshot already matches $sourceLabel blob"
+        currentBlob
+    }
+}
+
+private fun MetadataSyncCoordinator.shouldRestoreKernel(
+    kernelCredentialCount: Int,
+    targetCount: Int,
+): Boolean {
+    return kernelCredentialCount == 0 || (targetCount > 0 && kernelCredentialCount < targetCount)
+}
+
+private fun MetadataSyncCoordinator.restoreKernelFromBlob(
+    restoreBlob: ByteArray,
+    targetCount: Int,
+    notes: MutableList<String>,
+): SyncResult? {
+    val exportBlob = RootShell.writeFileBase64(
+        path = METADATA_BLOB_PATH,
+        payloadBase64 = Base64.encodeToString(restoreBlob, Base64.NO_WRAP)
+    )
+    if (!exportBlob.success) {
+        return SyncResult(false, notes + "failed to write restore blob to /metadata")
+    }
+    notes += "exported restore blob to /metadata"
+
+    val generationBefore = FidoKernelBridge.readStoreGeneration()
+    notes += "generation_before=${generationBefore ?: -1}"
+
+    val restoreTrigger = FidoKernelBridge.restoreMetadata()
+    if (!restoreTrigger.success) {
+        return kernelRestoreFailure(
+            notes = notes,
+            reason = "restore trigger failed",
+            triggerOutput = restoreTrigger.stdout
+        )
+    }
+
+    val observation = waitForKernelRestore(targetCount, generationBefore)
+    notes += "generation_after=${observation.generation ?: -1}"
+    notes += "restored_count=${observation.credentialCount ?: -1}/$targetCount"
+
+    if (generationBefore == null) {
+        return kernelRestoreFailure(notes, "generation before restore unavailable")
+    }
+    if (observation.generation == null || observation.generation <= generationBefore) {
+        return kernelRestoreFailure(notes, "restore triggered but generation unchanged")
+    }
+    if (targetCount > 0 &&
+        (observation.credentialCount == null || observation.credentialCount < targetCount)
+    ) {
+        return kernelRestoreFailure(notes, "restore incomplete")
+    }
+
+    notes += "restored metadata blob into kernel"
+    return null
+}
+
+private fun MetadataSyncCoordinator.waitForKernelRestore(
+    targetCount: Int,
+    generationBefore: Int?,
+    attempts: Int = 20,
+    delayMs: Long = 200,
+): KernelRestoreObservation {
+    repeat(attempts) {
+        val generation = FidoKernelBridge.readStoreGeneration()
+        val count = FidoKernelBridge.readCredentialCount()
+        if (generationBefore != null &&
+            generation != null &&
+            generation > generationBefore &&
+            (targetCount <= 0 || (count != null && count >= targetCount))
+        ) {
+            return KernelRestoreObservation(generation = generation, credentialCount = count)
+        }
+        Thread.sleep(delayMs)
+    }
+    return KernelRestoreObservation(
+        generation = FidoKernelBridge.readStoreGeneration(),
+        credentialCount = FidoKernelBridge.readCredentialCount()
+    )
+}
+
+private fun MetadataSyncCoordinator.kernelRestoreFailure(
+    notes: List<String>,
+    reason: String,
+    triggerOutput: String? = null,
+): SyncResult {
+    val failureNotes = notes.toMutableList()
+    failureNotes += reason
+    if (!triggerOutput.isNullOrBlank()) {
+        failureNotes += "trigger_output=${triggerOutput.toNoteValue()}"
+    }
+    failureNotes += "kernel_last_error=${FidoKernelBridge.readLastError().toNoteValue()}"
+    failureNotes += "kernel_last_trace=${FidoKernelBridge.readLastTrace().toNoteValue()}"
+    return SyncResult(success = false, notes = failureNotes)
+}
+
+private fun String.toNoteValue(): String {
+    val trimmed = trim()
+    if (trimmed.isEmpty()) return "none"
+    return trimmed.replace(Regex("\\s+"), " ")
 }
 
 private fun ByteArray.storeCredentialCount(): Int {

@@ -108,15 +108,23 @@ assembled.
 - Exposes a misc debug node as `/dev/hidgX` where `X` is usually `0` to `3`.
 - Exposes read-only status nodes under `/sys/kernel/abk_fido_key/`:
   `enabled`, `bound`, `udc`, `hid_dev`, `credential_count`, `last_error`,
-  `store_generation`.
+  `last_trace`, `store_generation`.
 - Exposes a write-only reload node under `/sys/kernel/abk_fido_key/reload_store`
   so userspace can force a reload from the metadata blob.
+- Exposes a write-only restore trigger under
+  `/sys/kernel/abk_fido_key/restore_metadata` so userspace can request a strict
+  restore from `/metadata/abk_fido_store.bin` without streaming the blob
+  through sysfs.
+- Exposes `/sys/kernel/abk_fido_key/store_blob` as a debug-only binary view of
+  the current store; it is not the primary persistence or restore path on
+  Android userspace.
 - Supports CTAP HID `INIT`, `PING`, `WINK`, `CBOR`, and `CANCEL`.
 - Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `clientPIN`
   (minimal), `reset`, and `selection`.
 - Persists the kernel-side FIDO store blob at `/metadata/abk_fido_store.bin`.
-- The companion app mirrors the latest blob into a SQLite database and exports
-  that database back to `/metadata/abk_fido.db`.
+- The companion app treats `/metadata/abk_fido_store.bin` as the primary blob
+  source, mirrors it into a SQLite database, and exports that database back to
+  `/metadata/abk_fido.db`.
 
 ## Validation / 验证方式
 
@@ -128,6 +136,10 @@ After a successful build and boot, check:
 - `/sys/kernel/abk_fido_key/bound` becomes `1` after the gadget is bound
 - `/dev/hidgX` exists for packet-level debugging
 - after a credential or PIN change, `/metadata/abk_fido_store.bin` exists
+- writing `1` to `/sys/kernel/abk_fido_key/restore_metadata` increments
+  `store_generation` and restores the expected `credential_count`
+- `/sys/kernel/abk_fido_key/last_error` is empty after a successful restore
+- `/sys/kernel/abk_fido_key/last_trace` reports the metadata restore path
 - after the companion app sync runs, `/metadata/abk_fido.db` exists
 
 ## GitHub Release Automation / GitHub 自动发布
@@ -163,7 +175,7 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
   credential-management extensions.
 - The kernel blob is the immediate source of truth for runtime state; the
   companion SQLite database is a mirrored persistence layer that syncs through
-  root shell file copies rather than in-kernel SQLite.
+  `/metadata/abk_fido_store.bin` rather than in-kernel SQLite.
 - If the companion app cannot obtain root, `/metadata/abk_fido.db` will not be
   refreshed, but the kernel blob at `/metadata/abk_fido_store.bin` still
   remains the primary persistent store.

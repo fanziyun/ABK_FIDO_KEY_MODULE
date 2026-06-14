@@ -74,8 +74,8 @@ data class SyncResult(
 internal class MetadataSyncCoordinator(context: Context) {
     private val appContext = context.applicationContext
     private val deviceContext = appContext.createDeviceProtectedStorageContext()
-    private val localDbFile = deviceContext.getDatabasePath(LOCAL_DB_NAME)
-    private val ownerUid = appContext.applicationInfo.uid
+    internal val localDbFile = deviceContext.getDatabasePath(LOCAL_DB_NAME)
+    internal val ownerUid = appContext.applicationInfo.uid
 
     fun syncNow(reason: String): SyncResult {
         synchronized(syncLock) {

@@ -37,6 +37,9 @@
             <meta-data
                 android:name="com.abk.kernel.extension.SETTINGS_ACTIVITY"
                 android:value=".FidoBootstrapActivity" />
+            <meta-data
+                android:name="com.abk.kernel.extension.SERVICE_ACTIVITY"
+                android:value=".FidoBootstrapActivity" />
         </activity>
 
         <activity

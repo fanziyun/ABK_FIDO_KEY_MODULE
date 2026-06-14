@@ -3756,6 +3756,7 @@ static const struct abk_control_ops abk_fido_control_ops = {
 	.companion_asset_name = "abk-fido-companion-release.apk",
 	.companion_download_url =
 		"https://github.com/xingguangcuican6666/ABK_FIDO_KEY_MODULE/releases/latest/download/abk-fido-companion-release.apk",
+	.service_activity = ".FidoBootstrapActivity",
 	.has_web_ui = false,
 	.has_action_script = false,
 	.action_supported = false,

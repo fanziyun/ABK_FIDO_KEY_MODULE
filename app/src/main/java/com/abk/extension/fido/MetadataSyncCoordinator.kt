@@ -56,6 +56,13 @@ internal class MetadataSyncCoordinator(context: Context) {
                 return SyncResult(success = false, notes = notes)
             }
 
+            val bootScript = RootShell.ensureBootStartScript()
+            if (bootScript.success) {
+                notes += "ensured service.d boot script"
+            } else {
+                notes += "boot script install failed"
+            }
+
             localDbFile.parentFile?.mkdirs()
 
             val importDb = RootShell.copyFileFromMetadata(METADATA_DB_PATH, localDbFile.absolutePath, ownerUid)

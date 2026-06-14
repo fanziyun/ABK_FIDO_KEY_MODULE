@@ -1969,6 +1969,60 @@ static int abk_fido_make_authdata_assert(const char *rp_id,
 	return 0;
 }
 
+static bool abk_fido_is_dummy_make_credential(struct abk_fido_make_cred_req *req)
+{
+	return (!strcmp(req->rp_id, ".dummy") && !strcmp(req->user_name, "dummy")) ||
+	       (!strcmp(req->rp_id, "SelectDevice") &&
+		!strcmp(req->user_name, "SelectDevice"));
+}
+
+static int abk_fido_make_dummy_credential_resp(struct abk_fido_make_cred_req *req,
+					       u8 *payload, size_t *payload_len)
+{
+	struct abk_cbor_writer w;
+	u8 auth_data[37] = { 0 };
+	int ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = abk_fido_load_store_locked();
+	if (ret && ret != -ENOENT)
+		goto out_unlock;
+
+	abk_fido_set_last_trace_locked(
+		"dummy makeCredential rp=%s user=%s uv=%u",
+		req->rp_id, req->user_name, req->uv);
+	pr_info("abk_fido_key: dummy makeCredential rp=%s user=%s uv=%u\n",
+		req->rp_id, req->user_name, req->uv);
+
+	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_MAKE_CREDENTIAL,
+					 req->rp_id, req->uv, false);
+	if (ret)
+		goto out_unlock;
+
+	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
+	abk_cbor_put_map(&w, 3);
+	abk_cbor_put_int(&w, 1);
+	abk_cbor_put_text(&w, "packed");
+	abk_cbor_put_int(&w, 2);
+	abk_cbor_put_bytes(&w, auth_data, sizeof(auth_data));
+	abk_cbor_put_int(&w, 3);
+	abk_cbor_put_map(&w, 2);
+	abk_cbor_put_text(&w, "alg");
+	abk_cbor_put_int(&w, ABK_FIDO_COSE_ALG_ES256);
+	abk_cbor_put_text(&w, "sig");
+	abk_cbor_put_bytes(&w, NULL, 0);
+	if (w.err) {
+		ret = w.err;
+		goto out_unlock;
+	}
+
+	*payload_len = w.pos;
+	ret = 0;
+out_unlock:
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
 static bool abk_fido_rp_matches_request(const char *stored_rp, const char *requested_rp)
 {
 	const char *host;
@@ -2471,6 +2525,9 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 	u64 pub_digits[ECC_MAX_DIGITS * 2] = {};
 	int ret;
 	u8 flags = ABK_FIDO_CRED_FLAG_UP;
+
+	if (abk_fido_is_dummy_make_credential(req))
+		return abk_fido_make_dummy_credential_resp(req, payload, payload_len);
 
 	mutex_lock(&abk_fido_dev.lock);
 	ret = abk_fido_load_store_locked();

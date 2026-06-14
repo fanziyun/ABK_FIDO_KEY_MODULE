@@ -24,10 +24,12 @@ case "$CUSTOM_EXTERNAL_MODULE_STAGE" in
   after_patch)
     abk_fido_install_kernel_files
     abk_fido_patch_usb_gadget
+    abk_fido_patch_selinux
     ;;
   before_build)
     abk_fido_install_kernel_files
     abk_fido_patch_usb_gadget
+    abk_fido_patch_selinux
     abk_fido_enable_config
     ;;
   *)

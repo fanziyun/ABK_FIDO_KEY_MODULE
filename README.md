@@ -33,7 +33,8 @@ What it adds / 它会增加这些内容:
 
 - `setup.sh`: external module entrypoint used by the ABK build hook.
 - `module.conf`: module metadata, version, and supported stages.
-- `scripts/`: helper shell and Python patch scripts.
+- `scripts/`: helper shell and Python patch scripts, including the SELinux
+  hooks patcher used during external-module injection.
 - `files/drivers/abk_fido_key/`: kernel driver source, Kconfig, and Makefile.
 - `files/include/linux/abk_fido_key.h`: public kernel header used by the
   configfs injection point.
@@ -89,7 +90,8 @@ Then rebuild:
 ## Stage Behavior / 阶段行为
 
 - `after_patch`: install kernel files and patch
-  `common/drivers/usb/gadget/configfs.c`.
+  `common/drivers/usb/gadget/configfs.c` plus
+  `common/security/selinux/hooks.c`.
 - `before_build`: do everything from `after_patch`, then enable the required
   `CONFIG_ABK_FIDO_KEY*` symbols in `DEFCONFIG`, including the metadata
   persistence toggle.

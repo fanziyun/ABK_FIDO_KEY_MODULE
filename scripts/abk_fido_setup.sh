@@ -26,6 +26,15 @@ abk_fido_patch_usb_gadget() {
   python3 "$MODULE_DIR/scripts/patch_configfs_for_abk_fido.py" "$configfs"
 }
 
+abk_fido_patch_selinux() {
+  local common_dir hooks
+  common_dir="$(abk_common_dir)"
+  hooks="$common_dir/security/selinux/hooks.c"
+
+  abk_require_file "$hooks"
+  python3 "$MODULE_DIR/scripts/patch_selinux_for_abk_fido.py" "$hooks"
+}
+
 abk_fido_enable_config() {
   abk_enable_config CONFIG_ABK_FIDO_KEY
   abk_enable_config CONFIG_ABK_FIDO_KEY_CTAP2

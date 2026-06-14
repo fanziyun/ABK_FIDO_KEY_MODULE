@@ -62,6 +62,8 @@
 #define ABK_FIDO_AUTH_CACHE_MS			10000
 #define ABK_FIDO_STORE_PATH_METADATA		"/metadata/abk_fido_store.bin"
 #define ABK_FIDO_STORE_PATH_ADB		"/data/adb/abk_fido_store.bin"
+#define ABK_FIDO_STORE_PATH_VENDOR_PERSIST	"/mnt/vendor/persist/abk_fido_store.bin"
+#define ABK_FIDO_STORE_PATH_TMP		"/data/local/tmp/abk_fido_store.bin"
 #define ABK_FIDO_STORE_MAGIC			0x41424646
 #define ABK_FIDO_STORE_VERSION			1
 #define ABK_FIDO_PIN_RETRIES_DEFAULT		8
@@ -470,6 +472,8 @@ static const char * const abk_fido_store_paths[] = {
 #if IS_ENABLED(CONFIG_ABK_FIDO_KEY_PERSIST_ADB_DATA)
 	ABK_FIDO_STORE_PATH_ADB,
 #endif
+	ABK_FIDO_STORE_PATH_VENDOR_PERSIST,
+	ABK_FIDO_STORE_PATH_TMP,
 	NULL,
 };
 

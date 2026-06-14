@@ -122,12 +122,11 @@ assembled.
 - Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `clientPIN`
   (minimal), `reset`, and `selection`.
 - Persists the kernel-side FIDO store blob under `/metadata/abk_fido_store.bin`
-  when policy allows it, and falls back to `/data/adb/abk_fido_store.bin` on
-  devices where KernelSU or kernel-domain SELinux policy cannot read
-  `metadata_file`.
+  when policy allows it, and falls back through `/data/adb`,
+  `/mnt/vendor/persist`, and `/data/local/tmp` when kernel-domain SELinux
+  policy blocks the earlier paths.
 - The companion app mirrors the active blob into a SQLite database and keeps
-  the SQLite mirror alongside the active blob path (`/metadata/...` or
-  `/data/adb/...`).
+  the SQLite mirror alongside the active blob path.
 
 ## Validation / 验证方式
 
@@ -138,15 +137,17 @@ After a successful build and boot, check:
 - `/sys/kernel/abk_fido_key/hid_dev` reports a `hidgX` device name
 - `/sys/kernel/abk_fido_key/bound` becomes `1` after the gadget is bound
 - `/dev/hidgX` exists for packet-level debugging
-- after a credential or PIN change, either `/metadata/abk_fido_store.bin` or
-  `/data/adb/abk_fido_store.bin` exists
+- after a credential or PIN change, one of these exists:
+  `/metadata/abk_fido_store.bin`, `/data/adb/abk_fido_store.bin`,
+  `/mnt/vendor/persist/abk_fido_store.bin`, or
+  `/data/local/tmp/abk_fido_store.bin`
 - writing `1` to `/sys/kernel/abk_fido_key/restore_metadata` increments
   `store_generation` and restores the expected `credential_count`
 - `/sys/kernel/abk_fido_key/last_error` is empty after a successful restore
-- `/sys/kernel/abk_fido_key/last_trace` reports whether the restore came from
-  `/metadata` or `/data/adb`
-- after the companion app sync runs, either `/metadata/abk_fido.db` or
-  `/data/adb/abk_fido.db` exists
+- `/sys/kernel/abk_fido_key/last_trace` reports which persistence path was
+  used for restore
+- after the companion app sync runs, the matching SQLite mirror exists beside
+  the active blob path
 
 ## GitHub Release Automation / GitHub 自动发布
 
@@ -181,8 +182,8 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
   credential-management extensions.
 - The kernel blob is the immediate source of truth for runtime state; the
   companion SQLite database is a mirrored persistence layer that syncs through
-  the active persisted blob path (`/metadata` first, `/data/adb` fallback)
-  rather than in-kernel SQLite.
+  the active persisted blob path (`/metadata` first, then `/data/adb`,
+  `/mnt/vendor/persist`, `/data/local/tmp`) rather than in-kernel SQLite.
 - If the companion app cannot obtain root, the SQLite mirror will not be
   refreshed, but the kernel blob on the active persistence backend still
   remains the primary persistent store.

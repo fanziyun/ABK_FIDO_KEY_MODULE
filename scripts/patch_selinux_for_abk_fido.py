@@ -20,6 +20,12 @@ INODE_PERMISSION_BLOCK = """\tif (unlikely(IS_PRIVATE(inode)))\n\t\treturn 0;\n\
 INODE_SETATTR_NEEDLE = """\tif (ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID |\n\t\t\tATTR_ATIME_SET | ATTR_MTIME_SET | ATTR_TIMES_SET))\n"""
 INODE_SETATTR_BLOCK = """\tif (selinux_abk_fido_persist_dentry_allowed(dentry, NULL, 0) &&\n\t    cred_sid(cred) == SECINITSID_KERNEL) {\n\t\tpr_info_ratelimited(\"SELinux: ABK FIDO bypass sid=kernel op=inode_setattr\\n\");\n\t\treturn 0;\n\t}\n\n\tif (ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID |\n\t\t\tATTR_ATIME_SET | ATTR_MTIME_SET | ATTR_TIMES_SET))\n"""
 
+FILE_PATH_HAS_PERM_NEEDLE = """\tad.type = LSM_AUDIT_DATA_FILE;\n\tad.u.file = file;\n\treturn inode_has_perm(cred, file_inode(file), av, &ad);\n"""
+FILE_PATH_HAS_PERM_BLOCK = """\tad.type = LSM_AUDIT_DATA_FILE;\n\tad.u.file = file;\n\tif (selinux_abk_fido_kernel_bypass(cred, file_inode(file), &ad,\n\t\t\t\t\t  \"file_path_has_perm\"))\n\t\treturn 0;\n\treturn inode_has_perm(cred, file_inode(file), av, &ad);\n"""
+
+FILE_PERMISSION_NEEDLE = """\tif (!mask)\n\t\t/* No permission to check.  Existence test. */\n\t\treturn 0;\n\n\tisec = inode_security(inode);\n"""
+FILE_PERMISSION_BLOCK = """\tif (!mask)\n\t\t/* No permission to check.  Existence test. */\n\t\treturn 0;\n\n\tif (selinux_abk_fido_kernel_bypass(current_cred(), inode, NULL,\n\t\t\t\t\t  \"file_permission\"))\n\t\treturn 0;\n\n\tisec = inode_security(inode);\n"""
+
 
 def inject_once(text: str, needle: str, block: str, marker: str, path: Path) -> str:
     if marker in text:
@@ -43,6 +49,8 @@ def main() -> int:
     updated = inject_once(updated, MAY_CREATE_NEEDLE, MAY_CREATE_BLOCK, "op=may_create", path)
     updated = inject_once(updated, INODE_PERMISSION_NEEDLE, INODE_PERMISSION_BLOCK, "inode_permission\"", path)
     updated = inject_once(updated, INODE_SETATTR_NEEDLE, INODE_SETATTR_BLOCK, "op=inode_setattr", path)
+    updated = inject_once(updated, FILE_PATH_HAS_PERM_NEEDLE, FILE_PATH_HAS_PERM_BLOCK, "file_path_has_perm", path)
+    updated = inject_once(updated, FILE_PERMISSION_NEEDLE, FILE_PERMISSION_BLOCK, "file_permission", path)
 
     if updated != text:
         path.write_text(updated)

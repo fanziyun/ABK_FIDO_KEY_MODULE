@@ -82,7 +82,7 @@ internal object FidoKernelBridge {
         RootShell.readFileBase64(STORE_BLOB_PATH)
 
     fun writeStoreBlobBase64(payloadBase64: String): RootShell.CommandResult =
-        RootShell.writeFileBase64(STORE_BLOB_PATH, payloadBase64)
+        RootShell.writeSysfsBlobBase64(STORE_BLOB_PATH, payloadBase64)
 
     fun readCredentialCount(): Int? =
         RootShell.readTextFile(CREDENTIAL_COUNT_PATH).stdout.trim().toIntOrNull()

@@ -76,6 +76,25 @@ internal object RootShell {
         )
     }
 
+    fun writeSysfsBlobBase64(path: String, payloadBase64: String): CommandResult {
+        return run(
+            """
+            set -e
+            dst=${shellQuote(path)}
+            tmp=$(/system/bin/mktemp /data/local/tmp/abk_fido_restore.XXXXXX)
+            trap 'rm -f "${'$'}tmp"' EXIT
+            printf '%s' ${shellQuote(payloadBase64)} | base64 -d > "${'$'}tmp"
+            size=$(/system/bin/stat -c %s "${'$'}tmp")
+            off=0
+            while [ "${'$'}off" -lt "${'$'}size" ]; do
+              /system/bin/dd if="${'$'}tmp" bs=4096 skip=$((off / 4096)) count=1 status=none 2>/dev/null | \
+                /system/bin/dd of="${'$'}dst" bs=4096 seek=$((off / 4096)) count=1 conv=notrunc status=none
+              off=$((off + 4096))
+            done
+            """.trimIndent()
+        )
+    }
+
     fun copyFileToMetadata(srcPath: String, dstPath: String): CommandResult {
         return run(
             """

@@ -54,6 +54,25 @@ internal object RootShell {
         )
     }
 
+    fun ensureEmptyFileIfMissing(path: String): CommandResult {
+        return run(
+            """
+            set -e
+            dst=${shellQuote(path)}
+            if [ -e "${'$'}dst" ]; then
+                printf 'exists'
+                exit 0
+            fi
+            parent=$(dirname "${'$'}dst")
+            mkdir -p "${'$'}parent"
+            touch "${'$'}dst"
+            chmod 0600 "${'$'}dst" 2>/dev/null || true
+            restorecon "${'$'}dst" 2>/dev/null || true
+            printf 'created'
+            """.trimIndent()
+        )
+    }
+
     fun writeTextFile(path: String, payload: String): CommandResult {
         return run(
             """

@@ -65,6 +65,16 @@ internal class MetadataSyncCoordinator(context: Context) {
                 return SyncResult(success = false, notes = notes)
             }
 
+            val ensureBlobFile = RootShell.ensureEmptyFileIfMissing(METADATA_BLOB_PATH)
+            when {
+                !ensureBlobFile.success -> {
+                    notes += "precreate failed for $METADATA_BLOB_PATH"
+                }
+                ensureBlobFile.stdout.contains("created") -> {
+                    notes += "precreated missing blob file at $METADATA_BLOB_PATH"
+                }
+            }
+
             localDbFile.parentFile?.mkdirs()
 
             var activeBackend = importDatabase()
@@ -249,6 +259,8 @@ private fun MetadataSyncCoordinator.readPersistedBlob(): PersistedBlob? {
         val blob = RootShell.readFileBase64(backend.blobPath)
             .takeIf { it.success }
             ?.stdout
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
             ?.let { raw -> runCatching { Base64.decode(raw, Base64.DEFAULT) }.getOrNull() }
         if (blob != null) {
             return PersistedBlob(backend = backend, bytes = blob)

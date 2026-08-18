@@ -272,6 +272,40 @@ grep -E 'CONFIG_ABK_FIDO_KEY=|CONFIG_CRYPTO_ECC=' "$DEFCONFIG"
   `ANDROID_SIGNING_KEY_PASSWORD`.
 - Pushes to `main` or `master` refresh the rolling `latest` release. Pushing a
   `v*` tag publishes the asset to the matching tagged release.
+- The job is skipped on forks, because signing secrets are not inherited and an
+  unsigned asset is worse than none. Add the four secrets above and run the
+  workflow manually (`workflow_dispatch`) to publish from a fork.
+- `app/` is unchanged in this fork and the companion is kernel-version
+  independent, so `ABK_EXTENSION_COMPANION_DOWNLOAD_URL` in `module.conf` still
+  points at the upstream signed release. Repoint it after publishing here.
+
+- 该 job 在 fork 上会跳过，因为签名 secret 不会被继承，发一个未签名的产物比不发更糟。
+  想从 fork 发布，需要自己配置上面四个 secret 并手动触发 `workflow_dispatch`。
+- 本 fork 没有改动 `app/`，且 companion 与内核版本无关，所以 `module.conf` 里的
+  `ABK_EXTENSION_COMPANION_DOWNLOAD_URL` 仍指向上游已签名的 release。
+  等这里自己发布后再改指向。
+
+## Development / 开发
+
+The installer and its tests run on any machine with Python 3.9 or newer; no
+kernel tree or cross toolchain is needed:
+
+安装器与测试在任何有 Python 3.9+ 的机器上都能跑，不需要内核树或交叉编译工具链：
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 -m py_compile scripts/install.py tests/test_installer.py
+bash -n setup.sh scripts/libabk.sh
+shellcheck --severity=warning setup.sh scripts/libabk.sh
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+```
+
+The tests use synthetic trees carrying only the anchors the installer owns, for
+both the 5.15 and 6.1 layouts. They check wiring, injection, idempotency,
+rollback, and every rejection path. They do not compile a kernel.
+
+测试使用只包含安装器关心的锚点的合成内核树，覆盖 5.15 与 6.1 两种布局，校验接线、
+注入、幂等、回滚以及所有拒绝路径；但不编译内核。
 
 ## Metadata / 元数据
 

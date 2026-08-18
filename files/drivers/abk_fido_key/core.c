@@ -3836,9 +3836,10 @@ static ssize_t store_generation_show(struct kobject *kobj, struct kobj_attribute
 static ssize_t reload_store_store(struct kobject *kobj, struct kobj_attribute *attr,
 				  const char *buf, size_t count)
 {
+	int ret;
+
 	(void)kobj;
 	(void)attr;
-	int ret;
 
 	if (!(sysfs_streq(buf, "1") || sysfs_streq(buf, "reload") ||
 	      sysfs_streq(buf, "restore")))
@@ -3854,9 +3855,10 @@ static ssize_t restore_metadata_store(struct kobject *kobj,
 				      struct kobj_attribute *attr,
 				      const char *buf, size_t count)
 {
+	int ret;
+
 	(void)kobj;
 	(void)attr;
-	int ret;
 
 	if (!(sysfs_streq(buf, "1") || sysfs_streq(buf, "restore") ||
 	      sysfs_streq(buf, "reload")))
@@ -4034,8 +4036,9 @@ static int abk_fido_control_set_enabled(bool enabled, void *data)
 
 static int abk_fido_control_run_command(const char *command, void *data)
 {
-	(void)data;
 	int ret = -EINVAL;
+
+	(void)data;
 
 	mutex_lock(&abk_fido_dev.lock);
 	if (!strcmp(command, "reload") || !strcmp(command, "reload_store")) {

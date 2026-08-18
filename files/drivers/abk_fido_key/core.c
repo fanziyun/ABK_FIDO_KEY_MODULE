@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* ABK_FIDO_KEY_V1 */
 
 #include <linux/abk_fido_key.h>
 
@@ -42,7 +43,20 @@
 #include <crypto/ecdh.h>
 #include <crypto/ecc_curve.h>
 #include <crypto/hash.h>
-#include <crypto/internal/ecc.h>
+/*
+ * The internal ECC header moved in v5.16: 5.15 keeps it at crypto/ecc.h, which
+ * is not under include/, so it is only reachable by relative path. 5.16 and
+ * later expose it as <crypto/internal/ecc.h>.
+ */
+#if defined(__has_include)
+#  if __has_include(<crypto/internal/ecc.h>)
+#    include <crypto/internal/ecc.h>
+#  else
+#    include "../../crypto/ecc.h"
+#  endif
+#else
+#  include <crypto/internal/ecc.h>
+#endif
 #include <crypto/sha2.h>
 #include <crypto/skcipher.h>
 

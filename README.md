@@ -171,18 +171,4 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 
 ## Current Limits / 当前边界
 
-- This is a first-pass kernel-side CTAP2 implementation aimed at
-  registration/authentication flows.
-- The module identifies itself as a generic `Security Key`; it does not try to
-  emulate a YubiKey.
-- `clientPIN` is intentionally minimal and does not cover full advanced
-  credential-management extensions.
-- The kernel blob is the immediate source of truth for runtime state; the
-  companion SQLite database is a mirrored persistence layer that syncs through
-  `/metadata/abk_fido_store.bin` rather than in-kernel SQLite.
-- If the companion app cannot obtain root, `/metadata/abk_fido.db` will not be
-  refreshed, but the kernel blob at `/metadata/abk_fido_store.bin` still
-  remains the primary persistent store.
-- The configfs patcher depends on specific anchors in
-  `common/drivers/usb/gadget/configfs.c`; if the kernel tree diverges, the
-  patch step must be updated.
+- Unsupport Windows Hello

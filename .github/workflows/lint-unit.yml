@@ -81,6 +81,26 @@ jobs:
           grep -q '"../../crypto/ecc.h"' files/drivers/abk_fido_key/core.c
           grep -q 'SUPPORTED_KERNELS = {"5.15", "6.1"}' scripts/install.py
 
+      - name: Check for 5.15 declaration-after-statement regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 5.15 builds with -Wdeclaration-after-statement and ABK adds -Werror,
+          # while 6.1 dropped the flag. Surface the driver's own findings here so
+          # the failure names the lines, not just the failing test.
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, "tests")
+          from pathlib import Path
+          from test_driver_style import find_declarations_after_statements
+
+          driver = Path("files/drivers/abk_fido_key/core.c")
+          findings = find_declarations_after_statements(driver.read_text(encoding="utf-8"))
+          for line, code in findings:
+              print(f"{driver}:{line}: {code.strip()}", file=sys.stderr)
+          sys.exit(1 if findings else 0)
+          PY
+
   unit:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

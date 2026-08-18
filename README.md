@@ -6,7 +6,26 @@ Android phone build into a composite USB FIDO2 security key.
 `abk_fido_key_module` 是一个 ABK 自定义外部内核模块，用来把 Android
 手机侧内核扩展成一个复合 USB FIDO2 Security Key。
 
-Current version / 当前版本: `0.2.0`
+Current version / 当前版本: `0.3.0`
+
+Supported kernel lines / 支持的内核线: **5.15** (`android13-5.15-lts`) and
+**6.1** (`android14-6.1-lts`). The installer reads `common/Makefile` and refuses
+any other line rather than producing a tree that fails deep in the kernel build.
+
+安装器会读取 `common/Makefile` 判断内核线，只接受 5.15 与 6.1；其它内核线直接
+报错退出，不会留下一个到编译后期才失败的内核树。
+
+The one kernel-API difference between these lines that affects this driver is the
+internal ECC header: 5.15 keeps it at `crypto/ecc.h` (outside `include/`, so only
+reachable by relative path), while 5.16 and later expose
+`<crypto/internal/ecc.h>`. `core.c` selects the right one with `__has_include`,
+so a single source tree builds on both lines. Every other kernel API this driver
+uses is signature-identical across 5.15.178 and 6.1.118.
+
+两条内核线之间唯一影响本驱动的 API 差异是内部 ECC 头文件位置：5.15 在
+`crypto/ecc.h`（不在 `include/` 下，只能相对路径引用），5.16 起改为
+`<crypto/internal/ecc.h>`。`core.c` 用 `__has_include` 自动选择，因此同一份
+源码在两条线上都能编译。其余用到的内核 API 在 5.15.178 与 6.1.118 上签名一致。
 
 ## Overview / 项目概览
 
@@ -32,9 +51,13 @@ What it adds / 它会增加这些内容:
 ## Repository Layout / 仓库结构
 
 - `setup.sh`: external module entrypoint used by the ABK build hook.
-- `module.conf`: module metadata, version, and supported stages.
-- `scripts/`: helper shell and Python patch scripts, including the KernelSU
-  SELinux policy patcher used during external-module injection.
+- `module.conf`: module metadata, version, supported stages, and kernel lines.
+- `scripts/install.py`: the installer. Copies the driver, wires
+  Kconfig/Makefile, injects the gadget configfs hooks, and patches the KernelSU
+  SELinux policy. Supports `install`, `verify`, `detect`, and `enable-config`.
+  Every write is transactional and idempotent.
+- `scripts/libabk.sh`: shell helpers shared by `setup.sh`.
+- `tests/test_installer.py`: black-box installer tests against synthetic trees.
 - `files/drivers/abk_fido_key/`: kernel driver source, Kconfig, and Makefile.
 - `files/include/linux/abk_fido_key.h`: public kernel header used by the
   configfs injection point.
@@ -45,40 +68,43 @@ What it adds / 它会增加这些内容:
 
 ### Prerequisites / 前置条件
 
-- An ABK or `new_test` style kernel build environment with `KERNEL_ROOT` and a
+- An ABK kernel build environment with `KERNEL_ROOT`, `DEFCONFIG`, and a
   `common/` kernel tree.
-- `python3` available in the build environment.
-- A `common/drivers/usb/gadget/configfs.c` layout compatible with the patch
-  anchors used by `scripts/patch_configfs_for_abk_fido.py`.
+- A 5.15 or 6.1 kernel tree. Other lines are rejected.
+- `python3` (3.9 or newer) available in the build environment.
+- `CONFIG_USB_GADGET=y` in the target defconfig. The installer checks this
+  before touching anything.
 - Root access on-device if you want the companion app to mirror the SQLite
   database into `/metadata`.
+- KernelSU is optional. When a KernelSU `selinux/rules.c` is found the installer
+  injects the `/metadata` allow rules; otherwise that step is skipped with a
+  warning and SELinux may deny the persisted credential store.
 
-### Generic Example / 通用示例
+### ABK Usage / ABK 使用方法
 
-Add the module to `new_test/.local-build/env.sh`:
+Add the repository in ABK and enable both stages. This is the string to paste
+into ABK's custom external modules field:
+
+在 ABK 中添加仓库并同时启用两个阶段，把下面这行填进 ABK 的自定义外部模块输入框：
+
+```text
+module:https://github.com/fanziyun/ABK_FIDO_KEY_MODULE;after_patch|module:https://github.com/fanziyun/ABK_FIDO_KEY_MODULE;before_build
+```
+
+ABK clones the module's default branch with `git clone --depth 1` and does not
+accept a branch or tag, so the default branch carries support for both kernel
+lines rather than splitting them across branches.
+
+ABK 用 `git clone --depth 1` 克隆模块的默认分支，且不接受分支或 tag 参数，
+所以默认分支同时支持两条内核线，而不是拆成多个分支。
+
+### Local Path Example / 本地路径示例
+
+For a local checkout, ABK also accepts a filesystem path:
 
 ```bash
 export USE_CUSTOM_EXTERNAL_MODULES="true"
 export CUSTOM_EXTERNAL_MODULES="/abs/path/to/abk_fido_key_module;after_patch|/abs/path/to/abk_fido_key_module;before_build"
-```
-
-### Repository URL Example / 仓库 URL 示例
-
-If your ABK external-module loader supports Git URLs directly, you can also use
-the public repository address:
-
-如果你的 ABK 外部模块加载器支持直接拉取 Git URL，也可以直接使用公开仓库地址：
-
-```bash
-export USE_CUSTOM_EXTERNAL_MODULES="true"
-export CUSTOM_EXTERNAL_MODULES="https://github.com/xingguangcuican6666/ABK_FIDO_KEY_MODULE.git;after_patch|https://github.com/xingguangcuican6666/ABK_FIDO_KEY_MODULE.git;before_build"
-```
-
-### Local Example / 当前本地示例
-
-```bash
-export USE_CUSTOM_EXTERNAL_MODULES="true"
-export CUSTOM_EXTERNAL_MODULES="/run/media/xingguangcuican/Project/kernelexp/new_test/abk_fido_key_module;after_patch|/run/media/xingguangcuican/Project/kernelexp/new_test/abk_fido_key_module;before_build"
 ```
 
 Then rebuild:
@@ -87,16 +113,42 @@ Then rebuild:
 ./rebuild.sh --reseed
 ```
 
+### Manual Invocation / 手动调用
+
+The installer runs standalone, which is the fastest way to check a tree before a
+full build:
+
+安装器可以独立运行，这是在完整编译前检查内核树最快的方式：
+
+```bash
+python3 scripts/install.py detect --kernel-root "$KERNEL_ROOT"
+python3 scripts/install.py install --kernel-root "$KERNEL_ROOT" --defconfig "$DEFCONFIG"
+python3 scripts/install.py enable-config --kernel-root "$KERNEL_ROOT" --defconfig "$DEFCONFIG"
+python3 scripts/install.py verify --kernel-root "$KERNEL_ROOT" --defconfig "$DEFCONFIG"
+```
+
 ## Stage Behavior / 阶段行为
 
-- `after_patch`: install kernel files and patch
-  `common/drivers/usb/gadget/configfs.c` plus
-  `common/drivers/kernelsu/selinux/rules.c`.
-- `before_build`: do everything from `after_patch`, then enable the required
-  `CONFIG_ABK_FIDO_KEY*` symbols in `DEFCONFIG`, including the metadata
-  persistence toggle.
+- `after_patch`: install the driver sources, wire `drivers/Kconfig` and
+  `drivers/Makefile`, inject the gadget configfs hooks, and patch the KernelSU
+  SELinux policy when present.
+- `before_build`: install (idempotent, so it is safe to repeat), enable the
+  required `CONFIG_*` symbols in `DEFCONFIG`, then statically verify the sources,
+  hooks, build wiring, and defconfig state. It does not compile the kernel.
 
-The patch injects `abk_fido_key_prepare_config()` into the gadget config bind
+Either stage alone produces a complete tree, but running both is recommended:
+`after_patch` lands the sources early, and `before_build` is what enables the
+config symbols and fails the build if anything is incomplete.
+
+单独使用任一阶段都能得到完整的内核树，但推荐两个阶段都启用：`after_patch`
+先把源码装进去，`before_build` 负责开启 config 符号，并在注入不完整时让构建失败。
+
+Installation is transactional: if any step fails, every file the installer
+touched is restored, so a failed run never leaves a half-patched tree.
+
+安装是事务化的：任一步失败都会回滚安装器改过的所有文件，不会留下半成品内核树。
+
+The hook injects `abk_fido_key_prepare_config()` into the gadget config bind
 flow so the `abk_fido` function is added automatically when the USB gadget is
 assembled.
 
@@ -130,6 +182,53 @@ assembled.
 - The companion app mirrors the active blob into a SQLite database and keeps
   the SQLite mirror in `/metadata/abk_fido.db`.
 
+## Biometric Authorization Flow / 指纹鉴权流程
+
+Every `makeCredential` and `getAssertion` is gated on a local biometric
+approval. The chain is implemented on both sides and needs no extra wiring:
+
+每次 `makeCredential` 与 `getAssertion` 都需要本地指纹放行。内核侧与应用侧都已
+实现，不需要额外接线：
+
+1. A CTAP request arrives over USB HID and reaches
+   `abk_fido_auth_begin_locked()`.
+2. The kernel publishes the pending request on
+   `/sys/kernel/abk_fido_key/auth_pending`, `auth_request_id`, and
+   `auth_context`, then calls `am start-foreground-service` through
+   `call_usermodehelper()` to raise the companion's `FidoSyncService`.
+3. The kernel sleeps in `wait_event_interruptible_timeout()` for up to 30
+   seconds, releasing its mutex first so the sysfs nodes stay readable.
+4. The companion polls `auth_pending` every 750 ms, shows an androidx
+   `BiometricPrompt`, and waits up to 25 seconds for the fingerprint.
+5. The companion writes `allow <id>` or `deny <id>` to
+   `/sys/kernel/abk_fido_key/auth_decision`.
+6. The kernel wakes, signs with its in-kernel P-256 key, and returns the CTAP
+   CBOR response over USB HID. An approval is cached for 10 seconds so a
+   multi-step ceremony does not prompt repeatedly.
+
+Additional nodes for this flow: `auth_gate_enabled` (read-write, disables the
+gate), `auth_pending`, `auth_request_id`, `auth_context` (read-only), and
+`auth_decision` (write-only).
+
+To test the kernel half without a fingerprint, approve a pending request by hand:
+
+不想走指纹时，可以手动放行一个待决请求，用来单独验证内核侧：
+
+```bash
+cat /sys/kernel/abk_fido_key/auth_context
+echo "allow $(cat /sys/kernel/abk_fido_key/auth_request_id)" > /sys/kernel/abk_fido_key/auth_decision
+cat /sys/kernel/abk_fido_key/last_trace
+```
+
+If `dmesg | grep abk_fido_key` shows a non-zero `bootstrap companion service
+ret=`, the usermode helper could not launch the service. The flow still works in
+that case because the companion polls `auth_pending` on its own; the helper only
+shortens the wait.
+
+如果 `dmesg | grep abk_fido_key` 里 `bootstrap companion service ret=` 非 0，
+说明 usermode helper 没能拉起服务。此时流程仍可工作，因为应用本身也在轮询
+`auth_pending`，helper 只是用来缩短等待。
+
 ## Validation / 验证方式
 
 After a successful build and boot, check:
@@ -139,12 +238,25 @@ After a successful build and boot, check:
 - `/sys/kernel/abk_fido_key/hid_dev` reports a `hidgX` device name
 - `/sys/kernel/abk_fido_key/bound` becomes `1` after the gadget is bound
 - `/dev/hidgX` exists for packet-level debugging
+- a host WebAuthn registration raises the fingerprint prompt, and
+  `dmesg | grep abk_fido_key` shows `auth pending` followed by `auth allowed`
 - after a credential or PIN change, `/metadata/abk_fido_store.bin` exists
 - writing `1` to `/sys/kernel/abk_fido_key/restore_metadata` increments
   `store_generation` and restores the expected `credential_count`
 - `/sys/kernel/abk_fido_key/last_error` is empty after a successful restore
 - `/sys/kernel/abk_fido_key/last_trace` reports the metadata restore path
 - after the companion app sync runs, `/metadata/abk_fido.db` exists
+
+Build-time checks before flashing:
+
+刷机前的构建期检查：
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 scripts/install.py verify --kernel-root "$KERNEL_ROOT" --defconfig "$DEFCONFIG"
+grep -n abk_fido_key "$KERNEL_ROOT/common/drivers/usb/gadget/configfs.c"
+grep -E 'CONFIG_ABK_FIDO_KEY=|CONFIG_CRYPTO_ECC=' "$DEFCONFIG"
+```
 
 ## GitHub Release Automation / GitHub 自动发布
 
@@ -172,3 +284,29 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 ## Current Limits / 当前边界
 
 - Unsupport Windows Hello
+- No CTAP1/U2F `MSG` handling. `U2F_V2` is advertised in `getInfo`, but the
+  transport only implements CTAP2 `CBOR`.
+- The kernel waits up to 30 s for a decision while the companion's prompt times
+  out at 25 s. With the 750 ms poll interval the worst case is about 25.75 s, so
+  the margin is roughly 4 s. If timeouts appear on a device, lower the app's
+  25 s rather than raising the kernel's 30 s: the USB host has its own CTAPHID
+  deadline.
+- Unplugging the cable while a request is waiting for a fingerprint can block
+  gadget teardown for the remainder of the 30 s wait: `abk_fido_unbind()` calls
+  `cancel_work_sync()` without waking the sleeping thread. This predates the
+  5.15 support and affects 6.1 identically.
+- The installer validates source anchors and defconfig state. It does not
+  compile, link, or boot a kernel, so a passing `verify` is not evidence that the
+  build succeeds or the device works.
+
+- 不支持 Windows Hello。
+- 没有实现 CTAP1/U2F 的 `MSG`；`getInfo` 里虽然声明了 `U2F_V2`，传输层只处理
+  CTAP2 的 `CBOR`。
+- 内核最多等 30 秒，应用侧提示超时是 25 秒，加上 750ms 轮询间隔，最坏约
+  25.75 秒，余量约 4 秒。设备上如果频繁超时，优先调小应用的 25 秒而不是调大
+  内核的 30 秒，因为 USB 宿主自己也有 CTAPHID 超时。
+- 等待指纹期间拔线，可能让 gadget 拆卸阻塞到 30 秒等待结束：
+  `abk_fido_unbind()` 只调用了 `cancel_work_sync()`，没有唤醒正在睡眠的线程。
+  这是 5.15 支持之前就存在的问题，6.1 上行为相同。
+- 安装器只校验源码锚点和 defconfig 状态，不编译、不链接、不启动内核；
+  `verify` 通过不等于能编译成功或设备可用。

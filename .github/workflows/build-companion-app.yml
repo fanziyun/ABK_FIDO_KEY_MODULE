@@ -15,6 +15,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Signing secrets are not inherited by forks, and an unsigned release asset
+    # is worse than none. Skip instead of failing every push on a fork.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !github.event.repository.fork
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -103,13 +108,17 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "title=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "rolling=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=${GITHUB_REF_NAME}"
+              echo "title=${GITHUB_REF_NAME}"
+              echo "rolling=false"
+            } >> "$GITHUB_OUTPUT"
           else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-            echo "title=latest" >> "$GITHUB_OUTPUT"
-            echo "rolling=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=latest"
+              echo "title=latest"
+              echo "rolling=true"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Move rolling release tag

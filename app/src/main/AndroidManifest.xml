@@ -56,7 +56,7 @@
             android:name=".PairingCodeActivity"
             android:excludeFromRecents="true"
             android:exported="false"
-            android:theme="@style/Theme.AbkFido.Translucent" />
+            android:theme="@style/Theme.AbkFido.Pairing" />
 
         <activity
             android:name=".CredentialProviderActivity"

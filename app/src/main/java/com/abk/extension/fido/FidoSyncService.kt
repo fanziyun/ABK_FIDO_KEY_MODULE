@@ -34,7 +34,7 @@ class FidoSyncService : Service() {
     override fun onCreate() {
         super.onCreate()
         RootShell.init()
-        lanServer = LanFidoServer(this, readPairingCode()).also { it.start() }
+        lanServer = LanFidoServer(readPairingCode()).also { it.start() }
         startForeground(NOTIFICATION_ID, buildNotification())
         running = true
         Log.i(TAG, "service created")

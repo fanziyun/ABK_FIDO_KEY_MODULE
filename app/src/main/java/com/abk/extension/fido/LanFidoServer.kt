@@ -1,7 +1,5 @@
 package com.abk.extension.fido
 
-import android.content.Context
-import android.content.Intent
 import android.util.Log
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -16,7 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /** Encrypted LAN CTAP HID relay. Pairing code is the user-visible PSK. */
-internal class LanFidoServer(private val context: Context, private val pairingCode: String, private val port: Int = 38741) {
+internal class LanFidoServer(private val pairingCode: String, private val port: Int = 38741) {
     @Volatile private var running = false
     private var server: ServerSocket? = null
     private var discovery: DatagramSocket? = null
@@ -69,8 +67,8 @@ internal class LanFidoServer(private val context: Context, private val pairingCo
                         val reply = HERE.toByteArray()
                         discovery?.send(DatagramPacket(reply, reply.size, packet.address, packet.port))
                     } else if (message == PAIR_REQUEST) {
-                        context.startActivity(Intent(context, PairingCodeActivity::class.java)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+                        val launch = RootShell.launchPairingCodeActivity()
+                        if (!launch.success) Log.w(TAG, "pairing activity launch failed: ${launch.stdout}")
                         val reply = PAIR_ACK.toByteArray()
                         discovery?.send(DatagramPacket(reply, reply.size, packet.address, packet.port))
                     }

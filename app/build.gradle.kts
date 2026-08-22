@@ -15,12 +15,12 @@ val hasReleaseSigning = listOf(
 
 android {
     namespace = "com.abk.extension.fido"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.abk.extension.fido"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 1
         versionName = "0.2.0"
     }

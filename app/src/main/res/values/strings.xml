@@ -12,4 +12,5 @@
     <string name="auth_biometric_unavailable">No biometric verification available. FIDO request rejected.</string>
     <string name="auth_biometric_denied">Biometric verification failed. FIDO request rejected.</string>
     <string name="auth_prompt_launch_failed">Unable to launch biometric prompt. Opening ABK extension page.</string>
+    <string name="diagnostics_title">ABK FIDO Test</string>
 </resources>

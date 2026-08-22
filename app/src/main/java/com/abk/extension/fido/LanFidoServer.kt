@@ -1,5 +1,7 @@
 package com.abk.extension.fido
 
+import android.content.Context
+import android.content.Intent
 import android.util.Log
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -14,7 +16,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /** Encrypted LAN CTAP HID relay. Pairing code is the user-visible PSK. */
-internal class LanFidoServer(private val pairingCode: String, private val port: Int = 38741) {
+internal class LanFidoServer(private val context: Context, private val pairingCode: String, private val port: Int = 38741) {
     @Volatile private var running = false
     private var server: ServerSocket? = null
     private var discovery: DatagramSocket? = null
@@ -26,7 +28,9 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
         Thread {
             runCatching {
                 server = ServerSocket(port)
-                while (running) server?.accept()?.let { socket -> Thread { serve(socket) }.start() }
+                while (running) server?.accept()?.let { socket ->
+                    Thread { runCatching { serve(socket) }.onFailure { Log.w(TAG, "LAN client closed", it) } }.start()
+                }
             }.onFailure { Log.e(TAG, "LAN FIDO server stopped", it) }
         }.start()
     }
@@ -60,8 +64,14 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
                 val buf = ByteArray(64)
                 while (running) {
                     val packet = DatagramPacket(buf, buf.size); discovery?.receive(packet)
-                    if (String(packet.data, 0, packet.length) == DISCOVER) {
+                    val message = String(packet.data, 0, packet.length)
+                    if (message == DISCOVER) {
                         val reply = HERE.toByteArray()
+                        discovery?.send(DatagramPacket(reply, reply.size, packet.address, packet.port))
+                    } else if (message == PAIR_REQUEST) {
+                        context.startActivity(Intent(context, PairingCodeActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+                        val reply = PAIR_ACK.toByteArray()
                         discovery?.send(DatagramPacket(reply, reply.size, packet.address, packet.port))
                     }
                 }
@@ -92,5 +102,7 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
         private const val DISCOVERY_PORT = 38740
         private const val DISCOVER = "ABK_FIDO_DISCOVER_V1"
         private const val HERE = "ABK_FIDO_HERE_V1"
+        private const val PAIR_REQUEST = "ABK_FIDO_PAIR_REQUEST_V1"
+        private const val PAIR_ACK = "ABK_FIDO_PAIR_ACK_V1"
     }
 }

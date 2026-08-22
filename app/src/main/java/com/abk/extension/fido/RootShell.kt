@@ -156,6 +156,16 @@ internal object RootShell {
         )
     }
 
+    fun launchPairingCodeActivity(): CommandResult {
+        return run(
+            """
+            am start -W -n 'com.abk.extension.fido/.PairingCodeActivity' \
+              -a android.intent.action.MAIN \
+              -f 0x10200000
+            """.trimIndent()
+        )
+    }
+
     fun run(script: String, timeoutSeconds: Long = 10L): CommandResult {
         init()
         return try {

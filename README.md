@@ -173,6 +173,15 @@ assembled.
   the current store; it is not the primary persistence or restore path on
   Android userspace.
 - Supports CTAP HID `INIT`, `PING`, `WINK`, `CBOR`, and `CANCEL`.
+- Exposes `/dev/abk_fido_ctap` as a transport-independent CTAP HID endpoint for
+  the Android Credential Manager provider and the desktop LAN bridge.
+- The companion registers as an Android 14+ Credential Manager passkey provider;
+  browser requests are translated to CTAP2 and gated by the existing biometric
+  approval flow.
+- `agent/` contains a Go desktop bridge. Linux creates a `/dev/uhid` virtual
+  FIDO HID device; the LAN session uses pairing-code-derived AES-GCM frames.
+  Windows keeps the HID backend isolated behind the same interface for a VHID
+  service implementation.
 - Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `clientPIN`
   (minimal), `reset`, and `selection`.
 - Persists the kernel-side FIDO store blob at `/metadata/abk_fido_store.bin`.
@@ -317,7 +326,6 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 
 ## Current Limits / 当前边界
 
-- Unsupport Windows Hello
 - No CTAP1/U2F `MSG` handling. `U2F_V2` is advertised in `getInfo`, but the
   transport only implements CTAP2 `CBOR`.
 - The kernel waits up to 30 s for a decision while the companion's prompt times
@@ -332,6 +340,8 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 - The installer validates source anchors and defconfig state. It does not
   compile, link, or boot a kernel, so a passing `verify` is not evidence that the
   build succeeds or the device works.
+- Windows native HID requires an installed VHID backend; the Go agent's
+  transport and protocol are platform independent.
 
 - 不支持 Windows Hello。
 - 没有实现 CTAP1/U2F 的 `MSG`；`getInfo` 里虽然声明了 `U2F_V2`，传输层只处理
@@ -344,3 +354,27 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
   这是 5.15 支持之前就存在的问题，6.1 上行为相同。
 - 安装器只校验源码锚点和 defconfig 状态，不编译、不链接、不启动内核；
   `verify` 通过不等于能编译成功或设备可用。
+- Windows 原生 HID 需要安装 VHID 后端；Go agent 的传输与协议与平台无关。
+
+## LAN pairing / 局域网配对
+
+The companion stores a six-to-twelve digit pairing code at
+`/metadata/abk_fido_pairing_code` and starts an encrypted TCP listener on port
+`38741`. The desktop agent discovers phones automatically when `-phone` is
+omitted, lets the user choose a discovered device, and asks that phone to show
+the pairing code in a confirmation window:
+
+```bash
+go run ./agent
+```
+
+For scripted use, the explicit form remains supported:
+
+```bash
+go run ./agent -pairing 123456 -phone 192.168.1.20:38741
+```
+
+The code is used as a PSK input to PBKDF2-HMAC-SHA256 and every frame is
+authenticated and encrypted with AES-GCM. Do not expose the listener outside a
+trusted LAN; rotate the code by deleting the metadata file and restarting the
+companion service.

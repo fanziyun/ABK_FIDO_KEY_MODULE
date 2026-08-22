@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -9,9 +10,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -134,13 +138,23 @@ func relay(conn net.Conn, pairing string, hid HID) error {
 
 func main() {
 	pairing := flag.String("pairing", "", "pairing code / PSK (required)")
-	phone := flag.String("phone", "", "phone LAN address, e.g. 192.168.1.20:38741")
+	phone := flag.String("phone", "", "phone LAN address, e.g. 192.168.1.20:38741 (auto-discovered when omitted)")
 	flag.Parse()
-	if *pairing == "" {
-		log.Fatal("-pairing is required")
-	}
 	if *phone == "" {
-		log.Fatal("-phone is required")
+		var err error
+		*phone, err = discoverPhone()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	if *pairing == "" {
+		requestPairing(*phone)
+		fmt.Print("Enter the pairing code shown on the phone: ")
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		*pairing = strings.TrimSpace(line)
+		if *pairing == "" {
+			log.Fatal("pairing code is required")
+		}
 	}
 	hid, err := NewHID("")
 	if err != nil {
@@ -159,4 +173,68 @@ func main() {
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+func discoverPhone() (string, error) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	msg := []byte("ABK_FIDO_DISCOVER_V1")
+	if _, err = conn.WriteToUDP(msg, &net.UDPAddr{IP: net.IPv4bcast, Port: 38740}); err != nil {
+		return "", err
+	}
+	seen := map[string]bool{}
+	var devices []string
+	buf := make([]byte, 128)
+	for {
+		n, addr, e := conn.ReadFromUDP(buf)
+		if e != nil {
+			break
+		}
+		if string(buf[:n]) == "ABK_FIDO_HERE_V1" {
+			phone := fmt.Sprintf("%s:38741", addr.IP.String())
+			if !seen[phone] {
+				seen[phone] = true
+				devices = append(devices, phone)
+			}
+		}
+	}
+	if len(devices) == 0 {
+		return "", fmt.Errorf("no ABK FIDO devices found")
+	}
+	for i, d := range devices {
+		fmt.Printf("[%d] %s\n", i+1, d)
+	}
+	if len(devices) == 1 {
+		return devices[0], nil
+	}
+	fmt.Print("Select device: ")
+	var choice int
+	if _, err := fmt.Scan(&choice); err != nil || choice < 1 || choice > len(devices) {
+		return "", fmt.Errorf("invalid device selection")
+	}
+	return devices[choice-1], nil
+}
+
+func requestPairing(phone string) {
+	host, _, splitErr := net.SplitHostPort(phone)
+	if splitErr != nil {
+		host = phone
+	}
+	addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(host, "38740"))
+	if err != nil {
+		log.Printf("pairing request: %v", err)
+		return
+	}
+	c, err := net.DialUDP("udp4", nil, addr)
+	if err != nil {
+		log.Printf("pairing request: %v", err)
+		return
+	}
+	defer c.Close()
+	_, _ = c.Write([]byte("ABK_FIDO_PAIR_REQUEST_V1"))
 }

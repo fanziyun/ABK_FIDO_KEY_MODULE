@@ -188,7 +188,15 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 
 The companion stores a six-to-twelve digit pairing code at
 `/metadata/abk_fido_pairing_code` and starts an encrypted TCP listener on port
-`38741`. The desktop agent is started with:
+`38741`. The desktop agent discovers phones automatically when `-phone` is
+omitted, lets the user choose a discovered device, and asks that phone to show
+the pairing code in a confirmation window:
+
+```bash
+go run ./agent
+```
+
+For scripted use, the explicit form remains supported:
 
 ```bash
 go run ./agent -pairing 123456 -phone 192.168.1.20:38741

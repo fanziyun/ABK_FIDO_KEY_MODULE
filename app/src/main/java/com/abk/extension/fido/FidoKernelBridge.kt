@@ -14,7 +14,7 @@ private const val CREDENTIAL_COUNT_PATH = "$SYSFS_BASE/credential_count"
 private const val RESTORE_METADATA_PATH = "$SYSFS_BASE/restore_metadata"
 private const val TAG = "AbkFidoCompanion"
 
-internal data class PendingAuthRequest(
+data class PendingAuthRequest(
     val requestId: Int,
     val command: String,
     val rpId: String,
@@ -22,7 +22,7 @@ internal data class PendingAuthRequest(
     val rk: Boolean,
 )
 
-internal object FidoKernelBridge {
+object FidoKernelBridge {
     fun readPendingAuthRequest(): PendingAuthRequest? {
         val pending = RootShell.readTextFile(AUTH_PENDING_PATH)
         if (!pending.success) {

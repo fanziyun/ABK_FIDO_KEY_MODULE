@@ -25,8 +25,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 64-bit MSBuild, because the WDK NuGet packages only ship 64-bit copies
+      # of some build tools. Their targets pick tool paths from
+      # %PROCESSOR_ARCHITECTURE% (drvcat) and the task DLLs load InfVerif.dll
+      # from a subdirectory named after the host process bitness, so a 32-bit
+      # MSBuild looks for an x86 drvcat.exe and x86\InfVerif.dll that are not
+      # in the package.
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
 
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
@@ -36,11 +44,26 @@ jobs:
       - name: Restore WDK packages
         run: nuget restore windows\vhid\packages.config -PackagesDirectory windows\vhid\packages
 
+      # WindowsDriver.Common.targets points InfToolPath at the WDK's x86 bin
+      # directory, but the NuGet package ships stampinf.exe only for x64 and
+      # ARM64. Without this override the build dies with
+      # "TRK0005: Failed to locate: stampinf.exe".
+      - name: Locate stampinf
+        shell: pwsh
+        run: |
+          $stamp = Get-ChildItem windows\vhid\packages -Recurse -File -Filter stampinf.exe |
+              Where-Object { $_.FullName -like '*\x64\*' } | Select-Object -First 1
+          if (-not $stamp) { throw 'stampinf.exe not found in the restored WDK packages' }
+          Write-Host "stampinf: $($stamp.FullName)"
+          "INF_TOOL_PATH=$($stamp.DirectoryName)" | Out-File $env:GITHUB_ENV -Append
+
       - name: Build driver
         run: >-
           msbuild windows\vhid\abkfidovhid.vcxproj
           -p:Configuration=Release -p:Platform=x64
           -p:TargetVersion=Windows10
+          -p:InfToolPath=$env:INF_TOOL_PATH
+          -p:InfToolArchitecture=Native64Bit
           -p:InfVerif_AdditionalOptions="/samples"
           -verbosity:minimal
 

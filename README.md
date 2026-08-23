@@ -128,8 +128,8 @@ assembled.
   approval flow.
 - `agent/` contains a Go desktop bridge. Linux creates a `/dev/uhid` virtual
   FIDO HID device; the LAN session uses pairing-code-derived AES-GCM frames.
-  Windows keeps the HID backend isolated behind the same interface for a VHID
-  service implementation.
+  Windows reaches the same interface through `\\.\ABKFidoVhid`, the control
+  device of the `windows/vhid` driver.
 - Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `clientPIN`
   (minimal), `reset`, and `selection`.
 - Persists the kernel-side FIDO store blob at `/metadata/abk_fido_store.bin`.
@@ -181,8 +181,58 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 ## Current Limits / 当前边界
 
 - Unsupport Windows Hello
-- Windows native HID requires an installed VHID backend; the Go agent's
-  transport and protocol are platform independent.
+- The LAN relay needs a virtual HID device on the desktop, and creating one is
+  privileged on both platforms: on Linux the agent uses `/dev/uhid` and must run
+  as root; on Windows it needs the `abkfidovhid` driver from
+  [Windows virtual HID driver](#windows-virtual-hid-driver--windows-虚拟-hid-驱动)
+  installed and must run elevated. That driver is self-signed here, so the
+  machine has to have test signing on (which means Secure Boot off) — if that is
+  not acceptable, connect the phone over USB instead, where the gadget is a
+  native FIDO HID key that needs no driver.
+  局域网中转在 Windows 上需要安装本仓库的 `abkfidovhid` 虚拟 HID 驱动，并开启测试签名
+  （需关闭安全启动）；若不便如此，请改用 USB 连接手机。
+
+## Windows virtual HID driver / Windows 虚拟 HID 驱动
+
+Windows WebAuthn only enumerates real HID devices, so `windows/` contains the
+driver that gives the LAN relay something for browsers to find:
+
+- `windows/vhid/` — `abkfidovhid.sys`, a KMDF function driver built on the
+  Virtual HID Framework (`vhf.sys` is added as a lower filter). It publishes a
+  CTAP HID device (usage page `0xF1D0`, 64-byte input and output reports) and
+  the control device `\\.\ABKFidoVhid`, whose security descriptor admits only
+  SYSTEM and Administrators. The WDK comes from the NuGet packages pinned in
+  `packages.config`, so no machine-wide WDK install is required.
+- `windows/tools/abkvhidctl/` — `abkvhidctl.exe`, which creates, inspects and
+  removes the root-enumerated devnode the driver binds to (`abkvhidctl install
+  <inf>` / `remove` / `status`). `pnputil` cannot invent a devnode for hardware
+  that does not exist, which is what a software-only HID source needs.
+- `windows/scripts/` — `Sign-Package.ps1` (packages and test-signs with a
+  freshly generated self-signed certificate), plus
+  `Install-AbkFidoVhid.ps1` / `Uninstall-AbkFidoVhid.ps1`.
+
+`.github/workflows/build-windows-vhid.yml` builds and test-signs all of it on
+`windows-latest` and uploads the `abk-fido-vhid-x64` artifact. To install, from
+an elevated PowerShell prompt in the extracted artifact:
+
+```powershell
+.\Install-AbkFidoVhid.ps1 -EnableTestSigning   # reboot, then run it again
+.\abkvhidctl.exe status
+```
+
+The certificate is generated on the machine that runs the build, so a
+self-signed package will only load while test signing is on; the installer
+checks Secure Boot and the test-signing flag and reports what is missing instead
+of changing boot configuration on its own. Devnode problem code 52 means the
+signature was rejected. Then run the agent elevated, as usual:
+
+```powershell
+sudo .\abk-fido-agent-windows-amd64.exe
+```
+
+To back it all out: `.\Uninstall-AbkFidoVhid.ps1 -RemoveDriverPackage
+-RemoveCertificate`, then `bcdedit /set testsigning off`.
+
 
 ## LAN pairing / 局域网配对
 

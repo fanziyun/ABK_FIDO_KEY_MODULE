@@ -1,0 +1,18 @@
+﻿<Project>
+  <!--
+    Makes the WDK NuGet packages usable without a machine-wide WDK install:
+    `nuget restore packages.config -PackagesDirectory packages` next to this
+    file is enough. When the packages are absent the imports are skipped and
+    the build falls back to an installed WDK or an EWDK build environment.
+  -->
+  <PropertyGroup>
+    <AbkWdkVersion Condition="'$(AbkWdkVersion)' == ''">10.0.28000.2526</AbkWdkVersion>
+    <AbkPackagesDir Condition="'$(AbkPackagesDir)' == ''">$(MSBuildThisFileDirectory)packages\</AbkPackagesDir>
+  </PropertyGroup>
+  <Import Project="$(AbkPackagesDir)Microsoft.Windows.WDK.x64.$(AbkWdkVersion)\build\native\Microsoft.Windows.WDK.x64.props"
+          Condition="'$(Platform)' == 'x64' and Exists('$(AbkPackagesDir)Microsoft.Windows.WDK.x64.$(AbkWdkVersion)\build\native\Microsoft.Windows.WDK.x64.props')" />
+  <Import Project="$(AbkPackagesDir)Microsoft.Windows.SDK.CPP.x64.$(AbkWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.x64.props"
+          Condition="'$(Platform)' == 'x64' and Exists('$(AbkPackagesDir)Microsoft.Windows.SDK.CPP.x64.$(AbkWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.x64.props')" />
+  <Import Project="$(AbkPackagesDir)Microsoft.Windows.SDK.CPP.$(AbkWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.props"
+          Condition="Exists('$(AbkPackagesDir)Microsoft.Windows.SDK.CPP.$(AbkWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.props')" />
+</Project>

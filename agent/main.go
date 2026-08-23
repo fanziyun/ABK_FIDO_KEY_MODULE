@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -157,6 +158,13 @@ func main() {
 	pairing := flag.String("pairing", "", "pairing code / PSK (required)")
 	phone := flag.String("phone", "", "phone LAN address, e.g. 192.168.1.20:38741 (auto-discovered when omitted)")
 	flag.Parse()
+	// Check the virtual-key backend before anything interactive: it needs root
+	// on Linux, and on Windows it needs the abkfidovhid driver installed and an
+	// elevated prompt. Either way the user should learn that before the phone
+	// shows a pairing code.
+	if err := checkHIDBackend(); err != nil {
+		log.Fatal(err)
+	}
 	if *phone == "" {
 		var err error
 		*phone, err = discoverPhone()
@@ -184,19 +192,36 @@ func main() {
 			log.Printf("UHID reader stopped: %v", err)
 		}
 	}()
+	// The relay is idle whenever the USB host is not talking to the key, so keep
+	// SO_KEEPALIVE on to detect a phone that disappears without closing.
+	dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	for {
-		conn, err := net.DialTimeout("tcp", *phone, 10*time.Second)
+		conn, err := dialer.Dial("tcp", *phone)
 		if err != nil {
 			log.Printf("phone connect: %v", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		log.Printf("relay connected to %s", *phone)
 		if err := relay(conn, *pairing, hub); err != nil {
-			log.Printf("session ended: %v", err)
+			if errors.Is(err, io.EOF) {
+				log.Print("phone closed the relay session; reconnecting")
+			} else {
+				log.Printf("session ended: %v", err)
+			}
 		}
 		time.Sleep(time.Second)
 	}
 }
+
+const (
+	discoveryPort = 38740
+	// discoveryProbes repeats the broadcast because the first probe is
+	// regularly lost on Windows: the firewall only decides whether to admit the
+	// phone's unicast answer once the program has asked for the first time, and
+	// the answer to that first probe is dropped while the prompt is open.
+	discoveryProbes = 3
+)
 
 func discoverPhone() (string, error) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
@@ -204,21 +229,34 @@ func discoverPhone() (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	targets := broadcastTargets()
 	msg := []byte("ABK_FIDO_DISCOVER_V1")
-	if _, err = conn.WriteToUDP(msg, &net.UDPAddr{IP: net.IPv4bcast, Port: 38740}); err != nil {
-		return "", err
-	}
 	seen := map[string]bool{}
 	var devices []string
 	buf := make([]byte, 128)
-	for {
-		n, addr, e := conn.ReadFromUDP(buf)
-		if e != nil {
-			break
+	for probe := 0; probe < discoveryProbes && len(devices) == 0; probe++ {
+		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		var sendErr error
+		sent := 0
+		for _, target := range targets {
+			if _, e := conn.WriteToUDP(msg, target); e != nil {
+				sendErr = e
+				continue
+			}
+			sent++
 		}
-		if string(buf[:n]) == "ABK_FIDO_HERE_V1" {
+		if sent == 0 {
+			return "", sendErr
+		}
+		conn.SetReadDeadline(time.Now().Add(time.Second))
+		for {
+			n, addr, e := conn.ReadFromUDP(buf)
+			if e != nil {
+				break
+			}
+			if string(buf[:n]) != "ABK_FIDO_HERE_V1" {
+				continue
+			}
 			phone := fmt.Sprintf("%s:38741", addr.IP.String())
 			if !seen[phone] {
 				seen[phone] = true
@@ -227,7 +265,9 @@ func discoverPhone() (string, error) {
 		}
 	}
 	if len(devices) == 0 {
-		return "", fmt.Errorf("no ABK FIDO devices found")
+		return "", fmt.Errorf("no ABK FIDO devices answered on UDP %d after probing %d broadcast address(es): "+
+			"check that the companion app is running on the same network and that the desktop firewall lets the "+
+			"reply in, or name the phone with -phone <ip>:38741", discoveryPort, len(targets))
 	}
 	for i, d := range devices {
 		fmt.Printf("[%d] %s\n", i+1, d)
@@ -243,12 +283,71 @@ func discoverPhone() (string, error) {
 	return devices[choice-1], nil
 }
 
+// broadcastTargets lists the addresses a discovery probe is sent to. A probe to
+// 255.255.255.255 leaves through the single interface the routing table picks,
+// which on Windows is regularly a Hyper-V or WSL virtual switch rather than the
+// adapter the phone is on, so each up interface's own directed broadcast is
+// probed as well.
+func broadcastTargets() []*net.UDPAddr {
+	targets := []*net.UDPAddr{{IP: net.IPv4bcast, Port: discoveryPort}}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return targets
+	}
+	seen := map[string]bool{net.IPv4bcast.String(): true}
+	for _, iface := range interfaces {
+		const wanted = net.FlagUp | net.FlagBroadcast
+		if iface.Flags&wanted != wanted || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, e := iface.Addrs()
+		if e != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			network, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			broadcast := directedBroadcast(network)
+			if broadcast == nil || seen[broadcast.String()] {
+				continue
+			}
+			seen[broadcast.String()] = true
+			targets = append(targets, &net.UDPAddr{IP: broadcast, Port: discoveryPort})
+		}
+	}
+	return targets
+}
+
+// directedBroadcast returns the IPv4 broadcast address of an interface network.
+// It returns nil for anything that cannot carry a broadcast: IPv6 addresses, and
+// point-to-point /32s whose broadcast address is the interface address itself.
+func directedBroadcast(network *net.IPNet) net.IP {
+	ip := network.IP.To4()
+	mask := network.Mask
+	if len(mask) == net.IPv6len {
+		mask = mask[12:]
+	}
+	if ip == nil || len(mask) != net.IPv4len {
+		return nil
+	}
+	broadcast := make(net.IP, net.IPv4len)
+	for i := range broadcast {
+		broadcast[i] = ip[i] | ^mask[i]
+	}
+	if broadcast.Equal(ip) {
+		return nil
+	}
+	return broadcast
+}
+
 func requestPairing(phone string) {
 	host, _, splitErr := net.SplitHostPort(phone)
 	if splitErr != nil {
 		host = phone
 	}
-	addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(host, "38740"))
+	addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(host, strconv.Itoa(discoveryPort)))
 	if err != nil {
 		log.Printf("pairing request: %v", err)
 		return

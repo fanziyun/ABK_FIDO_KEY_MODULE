@@ -184,15 +184,23 @@ func main() {
 			log.Printf("UHID reader stopped: %v", err)
 		}
 	}()
+	// The relay is idle whenever the USB host is not talking to the key, so keep
+	// SO_KEEPALIVE on to detect a phone that disappears without closing.
+	dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	for {
-		conn, err := net.DialTimeout("tcp", *phone, 10*time.Second)
+		conn, err := dialer.Dial("tcp", *phone)
 		if err != nil {
 			log.Printf("phone connect: %v", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		log.Printf("relay connected to %s", *phone)
 		if err := relay(conn, *pairing, hub); err != nil {
-			log.Printf("session ended: %v", err)
+			if errors.Is(err, io.EOF) {
+				log.Print("phone closed the relay session; reconnecting")
+			} else {
+				log.Printf("session ended: %v", err)
+			}
 		}
 		time.Sleep(time.Second)
 	}

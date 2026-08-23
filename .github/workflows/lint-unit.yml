@@ -56,7 +56,9 @@ jobs:
           test "$ABK_MODULE_REPO_URL" = 'https://github.com/fanziyun/ABK_FIDO_KEY_MODULE'
           test "$ABK_MODULE_SUPPORTED_STAGES" = 'after_patch,before_build'
           test "$ABK_MODULE_RECOMMENDED_STAGES" = 'after_patch,before_build'
-          test -x setup.sh
+          # Not test -x: upstream tracks setup.sh as 100644 and ABK chmod +x's it
+          # before running, so the exec bit is not part of the contract.
+          test -f setup.sh
 
       - name: Validate the 5.15 ECC include survives
         shell: bash

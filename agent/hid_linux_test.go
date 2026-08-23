@@ -97,3 +97,21 @@ func TestParseUHIDOutputRejectsOversizedSize(t *testing.T) {
 		t.Fatalf("expected oversized size error, ready=%v err=%v", ready, err)
 	}
 }
+
+// The kernel exports these ids as HID_ID=bus:vendor:product and Chromium drops
+// any hidraw node whose components exceed 16 bits, which hides the key from
+// Edge and Chrome while libfido2 still works.
+func TestUHIDCreateIdsFitSixteenBits(t *testing.T) {
+	event := buildUHIDCreate2()
+	vendor := binary.LittleEndian.Uint32(event[4+260:])
+	product := binary.LittleEndian.Uint32(event[4+264:])
+	if vendor != uhidVendorID || vendor > 0xffff {
+		t.Fatalf("vendor id %#x not a 16-bit value", vendor)
+	}
+	if product != uhidProductID || product > 0xffff {
+		t.Fatalf("product id %#x not a 16-bit value", product)
+	}
+	if got := binary.LittleEndian.Uint32(event); got != uhidCreate2 {
+		t.Fatalf("event type = %d, want %d", got, uhidCreate2)
+	}
+}

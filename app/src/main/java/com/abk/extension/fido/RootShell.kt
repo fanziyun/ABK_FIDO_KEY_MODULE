@@ -101,8 +101,11 @@ internal object RootShell {
     )
 
     fun readDeviceBase64(path: String, count: Int, timeoutSeconds: Long): CommandResult = run(
-        "dd if=${shellQuote(path)} bs=$count count=1 2>/dev/null | base64 | tr -d '\\n'",
-        timeoutSeconds,
+        // Keep the child command cancellable as well as the libsu job. A
+        // plain blocking dd can survive a Java thread interrupt and become a
+        // stale reader of the shared CTAP TX queue.
+        "set -o pipefail; timeout ${timeoutSeconds}s dd if=${shellQuote(path)} bs=$count count=1 2>/dev/null | base64",
+        timeoutSeconds + 2,
     )
 
     fun copyFileToMetadata(srcPath: String, dstPath: String): CommandResult {

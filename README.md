@@ -181,8 +181,14 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 ## Current Limits / 当前边界
 
 - Unsupport Windows Hello
-- Windows native HID requires an installed VHID backend; the Go agent's
-  transport and protocol are platform independent.
+- The LAN relay only produces a usable key on Linux, where the agent creates the
+  virtual HID device through `/dev/uhid` (so it must run as root). Windows has no
+  in-box equivalent and its WebAuthn stack only enumerates real HID devices: the
+  Windows agent expects a virtual-HID backend to serve
+  `\\.\pipe\abk-fido-vhid`, and no such backend ships here, so the agent stops
+  at startup and says so. On Windows connect the phone over USB instead — the
+  gadget is a native FIDO HID key there and needs no driver.
+  Windows 上请改用 USB 连接手机，局域网中转需要尚未提供的虚拟 HID 驱动。
 
 ## LAN pairing / 局域网配对
 

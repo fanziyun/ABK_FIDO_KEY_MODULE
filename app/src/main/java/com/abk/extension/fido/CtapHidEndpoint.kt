@@ -51,8 +51,17 @@ internal class CtapHidEndpoint : Closeable {
     fun writePacket(packet: ByteArray) {
         require(packet.size == 64) { "CTAP HID packet must be 64 bytes" }
         val encoded = Base64.encodeToString(packet, Base64.NO_WRAP)
-        val result = RootShell.writeDeviceBase64(DEVICE, encoded)
-        if (!result.success) throw IOException("write CTAP endpoint failed: ${result.stdout}")
+        // A rejected write means nothing reached the endpoint queue, so one
+        // retry cannot duplicate a packet. It covers a transiently full kernel
+        // TX queue, which would otherwise drop the whole CTAP transaction.
+        var failure = ""
+        repeat(WRITE_ATTEMPTS) { attempt ->
+            val result = RootShell.writeDeviceBase64(DEVICE, encoded)
+            if (result.success) return
+            failure = result.stdout
+            if (attempt < WRITE_ATTEMPTS - 1) Thread.sleep(WRITE_RETRY_DELAY_MS)
+        }
+        throw IOException("write CTAP endpoint failed: $failure")
     }
 
     fun readPacket(timeoutSeconds: Long = MAX_READ_SECONDS): ByteArray {
@@ -95,6 +104,8 @@ internal class CtapHidEndpoint : Closeable {
     companion object {
         const val DEVICE = "/dev/abk_fido_ctap"
         private const val MAX_READ_SECONDS = 40L
+        private const val WRITE_ATTEMPTS = 2
+        private const val WRITE_RETRY_DELAY_MS = 20L
         private const val BROADCAST_CID = -1
         private const val HID_INIT = 0x06
         private const val HID_KEEPALIVE = 0x3b

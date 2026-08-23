@@ -12,6 +12,10 @@ private const val LAST_TRACE_PATH = "$SYSFS_BASE/last_trace"
 private const val STORE_GENERATION_PATH = "$SYSFS_BASE/store_generation"
 private const val CREDENTIAL_COUNT_PATH = "$SYSFS_BASE/credential_count"
 private const val RESTORE_METADATA_PATH = "$SYSFS_BASE/restore_metadata"
+private const val RELOAD_STORE_PATH = "$SYSFS_BASE/reload_store"
+private const val AUTH_GATE_ENABLED_PATH = "$SYSFS_BASE/auth_gate_enabled"
+private const val BOUND_PATH = "$SYSFS_BASE/bound"
+private const val HID_DEV_PATH = "$SYSFS_BASE/hid_dev"
 private const val TAG = "AbkFidoCompanion"
 
 internal data class PendingAuthRequest(
@@ -85,6 +89,39 @@ internal object FidoKernelBridge {
 
     fun restoreMetadata(): RootShell.CommandResult =
         RootShell.writeTextFile(RESTORE_METADATA_PATH, "1\n")
+
+    fun reloadStore(): RootShell.CommandResult =
+        RootShell.writeTextFile(RELOAD_STORE_PATH, "1\n")
+
+    /**
+     * Whether the driver holds every CTAP operation until this app decides.
+     * It is the only policy knob the driver exposes: `enabled` is read-only, so
+     * the app's own master switch is enforced by keeping the gate on and denying
+     * while the switch is off.
+     */
+    fun readAuthGateEnabled(): Boolean? =
+        when (RootShell.readTextFile(AUTH_GATE_ENABLED_PATH).stdout.trim()) {
+            "1" -> true
+            "0" -> false
+            else -> null
+        }
+
+    fun writeAuthGateEnabled(enabled: Boolean): RootShell.CommandResult =
+        RootShell.writeTextFile(AUTH_GATE_ENABLED_PATH, if (enabled) "1\n" else "0\n")
+
+    /** True once the gadget is bound to a UDC, i.e. the key can talk over USB. */
+    fun readBound(): Boolean? =
+        when (RootShell.readTextFile(BOUND_PATH).stdout.trim()) {
+            "1" -> true
+            "0" -> false
+            else -> null
+        }
+
+    fun readHidDevice(): String =
+        RootShell.readTextFile(HID_DEV_PATH).stdout.trim()
+
+    fun isPresent(): Boolean =
+        RootShell.run("[ -d $SYSFS_BASE ]").success
 
     fun waitForCredentialCountAtLeast(target: Int, attempts: Int = 20, delayMs: Long = 200): Int? {
         repeat(attempts) {

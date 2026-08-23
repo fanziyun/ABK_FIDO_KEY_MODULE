@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="?attr/selectableItemBackground"
+    android:gravity="center_vertical"
+    android:minHeight="72dp"
+    android:orientation="horizontal"
+    android:paddingStart="24dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="8dp"
+    android:paddingBottom="8dp">
+
+    <ImageView
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_marginEnd="24dp"
+        android:contentDescription="@null"
+        android:src="@drawable/ic_fido_key" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/keyTitle"
+            style="@style/AbkRowTitle" />
+
+        <TextView
+            android:id="@+id/keyAccount"
+            style="@style/AbkRowSummary" />
+
+        <TextView
+            android:id="@+id/keyLastUsed"
+            style="@style/AbkRowSummary" />
+    </LinearLayout>
+
+    <ImageButton
+        android:id="@+id/keyOverflow"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/key_menu_more"
+        android:src="@drawable/ic_more_vert" />
+</LinearLayout>

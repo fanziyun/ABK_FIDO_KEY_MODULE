@@ -73,9 +73,10 @@ jobs:
         run: |
           set -euo pipefail
           # ABK builds with kernelsu_variant=None have no rules.c. The sepolicy
-          # step must warn and continue there, not abort the build.
+          # step must warn and continue there, not abort the build. The pattern
+          # avoids a literal '$' so shellcheck does not read it as an expansion.
           grep -q 'no KernelSU rules.c found' scripts/abk_fido_setup.sh
-          ! grep -q 'abk_require_file "$rules"' scripts/abk_fido_setup.sh
+          ! grep -qE 'abk_require_file .*rules' scripts/abk_fido_setup.sh
 
       - name: Check for 5.15 declaration-after-statement regressions
         shell: bash

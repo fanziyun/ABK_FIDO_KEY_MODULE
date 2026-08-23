@@ -35,6 +35,9 @@
     <string name="pairing_code_hidden">Tap to show the code a computer needs</string>
     <string name="pairing_code_unavailable">Unavailable — needs root</string>
     <string name="pairing_code_copied">Pairing code copied</string>
+    <string name="pairing_dialog_title">Pair ABK FIDO</string>
+    <string name="pairing_dialog_message">Enter this code in the desktop agent to pair this phone.</string>
+    <string name="pairing_code_none">Unavailable</string>
     <string name="lan_clients_title">Authorized computers</string>
     <string name="lan_clients_summary">%1$d authorized · %2$d waiting</string>
     <string name="lan_clients_summary_none">No computer has connected yet</string>
@@ -44,6 +47,8 @@
     <string name="keys_unreadable">The key store could not be read.</string>
     <string name="key_last_used">Last used: %1$s</string>
     <string name="key_never_used">Never used</string>
+    <string name="key_unnamed_account">Unnamed account</string>
+    <string name="key_unknown_site">Unknown site</string>
     <string name="key_menu_title">Options for %1$s</string>
     <string name="key_menu_more">More options</string>
     <string name="add_key_title">Add FIDO key</string>
@@ -104,4 +109,13 @@
     <string name="lan_menu_revoke">Revoke</string>
     <string name="lan_menu_forget">Forget</string>
     <string name="lan_anonymous_note">This computer runs an older agent and is recognized by its address only.</string>
+    <string name="lan_client_unnamed">Unnamed computer</string>
+    <string name="lan_client_at_address">Computer at %1$s</string>
+
+    <!-- Credential Manager provider -->
+    <string name="provider_entry_description">ABK kernel FIDO authenticator</string>
+    <string name="provider_get_failed">FIDO request failed</string>
+    <string name="provider_create_failed">FIDO creation failed</string>
+    <string name="provider_request_missing">Missing Credential Manager request</string>
+    <string name="provider_type_unsupported">Unsupported credential type</string>
 </resources>

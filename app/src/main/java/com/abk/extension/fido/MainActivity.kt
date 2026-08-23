@@ -210,8 +210,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun addKeyRow(record: FidoCredentialRecord) {
         val row = layoutInflater.inflate(R.layout.item_fido_key, keysContainer, false)
-        row.findViewById<TextView>(R.id.keyTitle).text = record.siteLabel
-        row.findViewById<TextView>(R.id.keyAccount).text = record.accountLabel
+        row.findViewById<TextView>(R.id.keyTitle).text = record.siteLabel(this)
+        row.findViewById<TextView>(R.id.keyAccount).text = record.accountLabel(this)
         val lastUsed = settings.lastUsed(record.rpId)
         row.findViewById<TextView>(R.id.keyLastUsed).text = if (lastUsed <= 0L) {
             getString(R.string.key_never_used)
@@ -219,7 +219,7 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.key_last_used, DateUtils.getRelativeTimeSpanString(this, lastUsed))
         }
         val overflow = row.findViewById<ImageButton>(R.id.keyOverflow)
-        overflow.contentDescription = getString(R.string.key_menu_title, record.siteLabel)
+        overflow.contentDescription = getString(R.string.key_menu_title, record.siteLabel(this))
         overflow.setOnClickListener { showKeyMenu(overflow, record) }
         row.setOnClickListener { showKeyMenu(overflow, record) }
         keysContainer.addView(row)
@@ -262,7 +262,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun confirmDelete(record: FidoCredentialRecord) {
         MaterialAlertDialogBuilder(this)
-            .setTitle(getString(R.string.delete_dialog_title, record.siteLabel))
+            .setTitle(getString(R.string.delete_dialog_title, record.siteLabel(this)))
             .setMessage(R.string.delete_dialog_message)
             .setNegativeButton(R.string.action_cancel, null)
             .setPositiveButton(R.string.action_delete) { _, _ ->
@@ -345,7 +345,10 @@ class MainActivity : AppCompatActivity() {
     private fun suggestedFileName(records: List<FidoCredentialRecord>): String {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
         val label = if (records.size == 1) {
-            records[0].siteLabel.lowercase(Locale.US).replace(Regex("[^a-z0-9.-]"), "-").take(32)
+            // The file name stays ASCII, so it comes from the raw rpId rather
+            // than the label the list shows.
+            records[0].rpId.lowercase(Locale.US).replace(Regex("[^a-z0-9.-]"), "-").take(32)
+                .ifBlank { "key" }
         } else {
             "all"
         }

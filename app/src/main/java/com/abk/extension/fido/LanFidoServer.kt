@@ -113,14 +113,14 @@ internal class LanFidoServer(
             if (client.status != LanClientStatus.AUTHORIZED) {
                 Log.w(
                     TAG,
-                    "refused LAN session from ${client.displayName} (${client.address}) status=${client.status}"
+                    "refused LAN session from ${client.logName} (${client.address}) status=${client.status}"
                 )
                 if (client.status == LanClientStatus.PENDING) listener?.onClientPending(client)
                 runCatching { writeControl(output, key, "hello-ack", client.status) }
                 return
             }
             runCatching { writeControl(output, key, "hello-ack", client.status) }
-            Log.i(TAG, "LAN session authorized for ${client.displayName} (${client.address})")
+            Log.i(TAG, "LAN session authorized for ${client.logName} (${client.address})")
 
             CtapHidEndpoint().use { endpoint ->
                 var authenticated = false
@@ -194,7 +194,8 @@ internal class LanFidoServer(
         val address = addressOf(socket)
         return registry.onHello(
             id = LanClientRecord.ADDRESS_ID_PREFIX + address,
-            name = "Computer at $address",
+            // No name is stored: the list names it after its address, translated.
+            name = "",
             os = "",
             address = address,
             autoAuthorize = settings.autoAuthorizeNewClients,

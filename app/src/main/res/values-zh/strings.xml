@@ -1,0 +1,121 @@
+<resources>
+    <string name="app_name">ABK FIDO 助手</string>
+    <string name="status_syncing">正在将 FIDO 密钥库与当前持久化后端同步…</string>
+    <string name="status_root_missing">无法获取 Root 权限，已跳过 FIDO 持久化同步。</string>
+    <string name="status_success_prefix">同步完成：</string>
+    <string name="status_failure_prefix">同步失败：</string>
+    <string name="service_channel_name">ABK FIDO 同步</string>
+    <string name="service_title">ABK FIDO 助手</string>
+    <string name="service_text">正在同步 FIDO 持久化密钥库状态</string>
+    <string name="auth_prompt_title">ABK FIDO 验证</string>
+    <string name="auth_prompt_subtitle">允许 %1$s 使用安全密钥</string>
+    <string name="auth_biometric_unavailable">没有可用的生物识别验证，已拒绝此次 FIDO 请求。</string>
+    <string name="auth_biometric_denied">生物识别验证失败，已拒绝此次 FIDO 请求。</string>
+    <string name="auth_prompt_launch_failed">无法唤起生物识别验证，正在打开 ABK 扩展页面。</string>
+
+    <string name="alert_channel_name">ABK FIDO 提醒</string>
+    <string name="alert_pending_client_title">有电脑想要使用密钥</string>
+    <string name="alert_pending_client_text">%1$s 正在等待你的批准</string>
+
+    <!-- 主界面 -->
+    <string name="main_title">FIDO 密钥</string>
+    <string name="main_subtitle">AnyBase Kernel</string>
+    <string name="master_switch_title">启用 FIDO 密钥</string>
+    <string name="status_driver_missing">未加载 abk_fido_key 驱动。</string>
+    <string name="status_root_unavailable">Root 权限被拒绝，管理密钥需要 Root。</string>
+    <string name="status_keys">已使用 %1$d / %2$d 个槽位</string>
+    <string name="status_host_connected">已连接到 USB 主机</string>
+    <string name="status_host_waiting">正在等待 USB 主机</string>
+    <string name="status_disabled">此开关关闭时，网站的请求都会被拒绝。</string>
+
+    <string name="section_wireless">无线</string>
+    <string name="wireless_switch_title">通过 Wi‑Fi 使用 FIDO</string>
+    <string name="wireless_switch_summary">允许本网络中已授权的电脑使用此密钥</string>
+    <string name="pairing_code_title">配对码</string>
+    <string name="pairing_code_hidden">点按查看电脑需要输入的配对码</string>
+    <string name="pairing_code_unavailable">不可用 — 需要 Root</string>
+    <string name="pairing_code_copied">配对码已复制</string>
+    <string name="pairing_dialog_title">配对 ABK FIDO</string>
+    <string name="pairing_dialog_message">在桌面代理中输入此配对码，即可与这台手机配对。</string>
+    <string name="pairing_code_none">不可用</string>
+    <string name="lan_clients_title">已授权的电脑</string>
+    <string name="lan_clients_summary">已授权 %1$d 台 · %2$d 台等待中</string>
+    <string name="lan_clients_summary_none">还没有电脑连接过</string>
+
+    <string name="section_keys">已注册的 FIDO 密钥</string>
+    <string name="keys_empty">还没有密钥。在网站上注册一个，或导入密钥文件。</string>
+    <string name="keys_unreadable">无法读取密钥库。</string>
+    <string name="key_last_used">最近使用：%1$s</string>
+    <string name="key_never_used">从未使用</string>
+    <string name="key_unnamed_account">未命名的账号</string>
+    <string name="key_unknown_site">未知网站</string>
+    <string name="key_menu_title">%1$s 的选项</string>
+    <string name="key_menu_more">更多选项</string>
+    <string name="add_key_title">添加 FIDO 密钥</string>
+    <string name="add_key_message">密钥由你注册的网站创建：打开网站，选择添加安全密钥，然后在这里批准。在另一台手机上保存的密钥，可以改用密钥文件导入。</string>
+
+    <string name="section_backup">备份</string>
+    <string name="export_all_title">导出全部密钥</string>
+    <string name="export_all_summary">保存为加密的 .abkfido 文件</string>
+    <string name="import_title">导入密钥</string>
+    <string name="import_summary">从 .abkfido 文件添加密钥</string>
+
+    <!-- 对话框与结果提示 -->
+    <string name="action_cancel">取消</string>
+    <string name="action_save">保存</string>
+    <string name="action_close">关闭</string>
+    <string name="action_copy">复制配对码</string>
+    <string name="action_delete">删除</string>
+    <string name="action_export">导出</string>
+    <string name="action_import">导入</string>
+    <string name="action_rename">重命名</string>
+    <string name="rename_dialog_title">重命名密钥</string>
+    <string name="rename_field_name">账号名称</string>
+    <string name="rename_field_display">显示名称</string>
+    <string name="delete_dialog_title">要删除 %1$s 的密钥吗？</string>
+    <string name="delete_dialog_message">该网站将不再接受此密钥；除非此前已导出，否则无法恢复。</string>
+    <string name="passphrase_export_title">保护导出文件</string>
+    <string name="passphrase_export_message">文件中含有私钥，因此始终会加密。请设置一个以后用来解锁它的口令。</string>
+    <string name="passphrase_import_title">打开密钥文件</string>
+    <string name="passphrase_import_message">请输入导出该文件时使用的口令。</string>
+    <string name="passphrase_field">口令</string>
+    <string name="passphrase_confirm_field">再次输入口令</string>
+    <string name="passphrase_mismatch">两次输入的口令不一致。</string>
+    <string name="passphrase_too_short">至少需要 8 个字符。</string>
+    <string name="working">处理中…</string>
+    <string name="export_done">已导出 %1$d 个密钥</string>
+    <string name="export_failed">导出失败：%1$s</string>
+    <string name="import_done">已导入 %1$d 个密钥，跳过 %2$d 个已存在的密钥</string>
+    <string name="import_nothing_new">该文件中的密钥都已在这台手机上</string>
+    <string name="import_failed">导入失败：%1$s</string>
+    <string name="rename_done">密钥已重命名</string>
+    <string name="delete_done">密钥已删除</string>
+    <string name="edit_failed">%1$s</string>
+    <string name="root_needed">此操作需要 Root 权限。</string>
+    <string name="no_keys_to_export">没有可导出的密钥。</string>
+
+    <!-- 已授权的电脑界面 -->
+    <string name="lan_title">已授权的电脑</string>
+    <string name="lan_auto_title">信任新电脑</string>
+    <string name="lan_auto_summary">电脑输入配对码后立即授权</string>
+    <string name="lan_empty">还没有电脑连接过。请运行桌面代理，并输入配对码。</string>
+    <string name="lan_status_pending">等待批准</string>
+    <string name="lan_status_authorized">已授权</string>
+    <string name="lan_status_blocked">已屏蔽</string>
+    <string name="lan_client_detail">%1$s · %2$s</string>
+    <string name="lan_last_seen">最近出现 %1$s</string>
+    <string name="lan_menu_authorize">授权</string>
+    <string name="lan_menu_block">屏蔽</string>
+    <string name="lan_menu_revoke">撤销授权</string>
+    <string name="lan_menu_forget">忘记</string>
+    <string name="lan_anonymous_note">这台电脑运行的是旧版代理，只能通过地址识别。</string>
+    <string name="lan_client_unnamed">未命名的电脑</string>
+    <string name="lan_client_at_address">位于 %1$s 的电脑</string>
+
+    <!-- 凭据管理器提供方 -->
+    <string name="provider_entry_description">ABK 内核 FIDO 认证器</string>
+    <string name="provider_get_failed">FIDO 请求失败</string>
+    <string name="provider_create_failed">创建 FIDO 密钥失败</string>
+    <string name="provider_request_missing">缺少凭据管理器请求</string>
+    <string name="provider_type_unsupported">不支持的凭据类型</string>
+</resources>

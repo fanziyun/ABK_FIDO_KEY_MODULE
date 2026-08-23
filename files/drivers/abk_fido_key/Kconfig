@@ -1,10 +1,8 @@
-# ABK_FIDO_KEY_V1
 config ABK_FIDO_KEY
 	bool "ABK FIDO2 USB Security Key"
 	depends on USB_GADGET
 	select CRYPTO
 	select CRYPTO_ECC
-	select CRYPTO_ECDH
 	select CRYPTO_HMAC
 	select CRYPTO_SHA256
 	select CRYPTO_AES

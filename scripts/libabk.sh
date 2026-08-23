@@ -34,29 +34,14 @@ abk_require_dir() {
 
 abk_common_dir() {
   abk_require_env KERNEL_ROOT
-  if [ -f "$KERNEL_ROOT/common/Makefile" ]; then
-    printf '%s/common\n' "$KERNEL_ROOT"
-  elif [ -f "$KERNEL_ROOT/Makefile" ]; then
-    printf '%s\n' "$KERNEL_ROOT"
-  else
-    abk_die "kernel Makefile not found below $KERNEL_ROOT"
-  fi
+  printf '%s/common\n' "$KERNEL_ROOT"
 }
 
-abk_kernel_make_value() {
-  local key="$1"
-  local makefile
-  makefile="$(abk_common_dir)/Makefile"
-  abk_require_file "$makefile"
-  awk -v key="$key" '$1 == key && $2 == "=" { print $3; exit }' "$makefile"
-}
-
-abk_kernel_version() {
-  local version patchlevel sublevel
-  version="$(abk_kernel_make_value VERSION)"
-  patchlevel="$(abk_kernel_make_value PATCHLEVEL)"
-  sublevel="$(abk_kernel_make_value SUBLEVEL)"
-  printf '%s.%s.%s\n' "$version" "$patchlevel" "$sublevel"
+abk_append_line_once() {
+  local file="$1"
+  local line="$2"
+  abk_require_file "$file"
+  grep -qF "$line" "$file" || printf '%s\n' "$line" >> "$file"
 }
 
 abk_set_config() {
@@ -78,7 +63,6 @@ abk_set_config() {
   esac
   printf '%s\n' "$line" >> "$tmp"
   mv "$tmp" "$file"
-  abk_log "set CONFIG_${clean_symbol}=$value in $file"
 }
 
 abk_enable_config() {

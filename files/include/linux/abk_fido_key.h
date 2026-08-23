@@ -1,5 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* ABK_FIDO_KEY_V1 */
 #ifndef _LINUX_ABK_FIDO_KEY_H
 #define _LINUX_ABK_FIDO_KEY_H
 

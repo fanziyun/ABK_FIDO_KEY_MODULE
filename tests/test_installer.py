@@ -8,6 +8,7 @@ the tree it is given, not that the resulting kernel builds or boots.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -21,6 +22,27 @@ INSTALLER = REPOSITORY / "scripts/install.py"
 SETUP = REPOSITORY / "setup.sh"
 
 MARKER = "ABK_FIDO_KEY_V1"
+
+
+def _load_installer() -> object:
+    """Import install.py as a module so its needle tables can be reused."""
+    name = "abk_fido_installer"
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(name, INSTALLER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves annotations through sys.modules, so register before
+    # executing rather than after.
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
 
 # Mirrors the shape of drivers/usb/gadget/configfs.c that the installer anchors
 # on. Verified byte-identical in android13-5.15-lts and android14-6.1-lts for
@@ -508,6 +530,40 @@ class VerifyTest(InstallerTestCase):
         tree = self.tree()
         tree.defconfig.write_text("CONFIG_CRYPTO_ECC=y\n", encoding="utf-8")
         self.assertFailed(tree.install(), "CONFIG_USB_GADGET=y is required")
+
+
+class DriverTemplateTest(unittest.TestCase):
+    """Guard the shipped core.c against the shapes verify() rejects.
+
+    verify() compares the installed file byte-for-byte with this template, so a
+    template that fails its own needle checks would break every build after the
+    tree is installed rather than here.
+    """
+
+    def setUp(self) -> None:
+        self.core = (REPOSITORY / "files/drivers/abk_fido_key/core.c").read_text(
+            encoding="utf-8"
+        )
+        self.installer = _load_installer()
+
+    def test_template_satisfies_every_required_needle(self) -> None:
+        for needle in self.installer.CORE_NEEDLES:
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.core)
+
+    def test_template_avoids_every_forbidden_needle(self) -> None:
+        for needle in self.installer.CORE_FORBIDDEN_NEEDLES:
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, self.core)
+
+    def test_gadget_function_is_registered_exactly_once(self) -> None:
+        # DECLARE_USB_FUNCTION only defines the driver struct, so the single
+        # module_init in the driver must register and unregister it itself.
+        self.assertEqual(self.core.count("usb_function_register(&abk_fidousb_func)"), 1)
+        self.assertEqual(self.core.count("usb_function_unregister(&abk_fidousb_func)"), 1)
+        self.assertEqual(self.core.count("module_init("), 1)
+        self.assertEqual(self.core.count("module_exit("), 1)
+
 
 class DefconfigTest(InstallerTestCase):
     def test_enable_config_promotes_tristate_crypto_to_builtin(self) -> None:

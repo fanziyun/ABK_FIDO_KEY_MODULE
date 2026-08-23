@@ -27,6 +27,17 @@ uses is signature-identical across 5.15.178 and 6.1.118.
 `<crypto/internal/ecc.h>`。`core.c` 用 `__has_include` 自动选择，因此同一份
 源码在两条线上都能编译。其余用到的内核 API 在 5.15.178 与 6.1.118 上签名一致。
 
+The gadget function is declared with `DECLARE_USB_FUNCTION` and registered from
+the driver's own `abk_fido_core_init()`. `DECLARE_USB_FUNCTION_INIT` would expand
+to a second `module_init`/`module_exit` pair and collide with that one, so
+`verify` requires the plain macro and rejects the `_INIT` form. This is identical
+on both kernel lines.
+
+gadget function 用 `DECLARE_USB_FUNCTION` 声明，并在驱动自己的
+`abk_fido_core_init()` 里注册。`DECLARE_USB_FUNCTION_INIT` 会额外展开出一对
+`module_init`/`module_exit`，与已有的冲突，因此 `verify` 只接受不带 `_INIT`
+的宏，遇到 `_INIT` 形式直接报错。两条内核线上行为一致。
+
 ## Overview / 项目概览
 
 This module installs an out-of-tree kernel driver, patches the Android USB

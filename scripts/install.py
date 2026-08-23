@@ -46,6 +46,23 @@ CONFIGFS_INCLUDE = "#include <linux/abk_fido_key.h>"
 # Driver sources copied verbatim into the kernel tree. Each must carry MARKER.
 DRIVER_SOURCES = ("Kconfig", "Makefile", "core.c")
 
+# Needles verify() requires in the installed core.c. The gadget function is
+# declared with DECLARE_USB_FUNCTION and registered from the driver's own
+# module_init: DECLARE_USB_FUNCTION_INIT would emit a second module_init and
+# collide with abk_fido_core_init in a built-in driver.
+CORE_NEEDLES = (
+    MARKER,
+    "DECLARE_USB_FUNCTION(abk_fido, abk_fido_alloc_inst, abk_fido_alloc);",
+    "usb_function_register(&abk_fidousb_func)",
+    "usb_function_unregister(&abk_fidousb_func)",
+    "abk_fido_auth_begin_locked",
+    "abk_fido_bootstrap_companion_service",
+)
+
+# DECLARE_USB_FUNCTION_INIT expands to its own module_init/module_exit pair, so
+# using it here would collide with abk_fido_core_init/exit at link time.
+CORE_FORBIDDEN_NEEDLES = ("DECLARE_USB_FUNCTION_INIT",)
+
 _ACTIVE_TRANSACTION: "InstallTransaction | None" = None
 _VALIDATION_ONLY = False
 
@@ -718,18 +735,21 @@ def verify(layout: Layout, module_root: Path, defconfig: Path | None) -> None:
             "abk_fido_key_prepare_config(cdev, c, &cfg->func_list)",
             "abk_fido_key_release_config(&cfg->func_list)",
         ),
-        layout.common / DRIVER_DIR / "core.c": (
-            MARKER,
-            "DECLARE_USB_FUNCTION_INIT(abk_fido",
-            "abk_fido_auth_begin_locked",
-            "abk_fido_bootstrap_companion_service",
-        ),
+        layout.common / DRIVER_DIR / "core.c": CORE_NEEDLES,
     }
     for path, needles in checks.items():
         text = read(path)
         for needle in needles:
             if needle not in text:
                 raise InstallError(f"incomplete FIDO injection: {needle!r} missing from {path}")
+
+    core = read(layout.common / DRIVER_DIR / "core.c")
+    for needle in CORE_FORBIDDEN_NEEDLES:
+        if needle in core:
+            raise InstallError(
+                f"conflicting FIDO injection: {needle!r} present in "
+                f"{layout.common / DRIVER_DIR / 'core.c'}; it would duplicate module_init"
+            )
 
     _validate_configfs_installed(
         layout.common / "drivers/usb/gadget/configfs.c",

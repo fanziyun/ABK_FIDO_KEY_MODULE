@@ -1,6 +1,8 @@
 package com.abk.extension.fido
 
+import android.os.Build
 import android.util.Log
+import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
@@ -18,7 +20,18 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /** Encrypted LAN CTAP HID relay. Pairing code is the user-visible PSK. */
-internal class LanFidoServer(private val pairingCode: String, private val port: Int = 38741) {
+internal class LanFidoServer(
+    private val pairingCode: String,
+    private val registry: LanClientRegistry,
+    private val settings: FidoSettings,
+    private val listener: Listener? = null,
+    private val port: Int = 38741,
+) {
+    /** Lets the service react to a desktop the user has not decided about yet. */
+    internal interface Listener {
+        fun onClientPending(record: LanClientRecord)
+    }
+
     @Volatile private var running = false
     @Volatile private var server: ServerSocket? = null
     @Volatile private var discovery: DatagramSocket? = null
@@ -83,6 +96,32 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
             val serverNonce = ByteArray(16); SecureRandom().nextBytes(serverNonce); output.write(serverNonce); output.flush()
             val key = derive(pairingCode, clientNonce + serverNonce)
             it.soTimeout = SOCKET_TIMEOUT_MS
+
+            // First frame of the session. A current agent sends a hello frame
+            // that names the machine; an older one sends a 64-byte CTAP report
+            // straight away and is identified by address only. Either way the
+            // session only continues once the user has authorized that client.
+            var pending: ByteArray? = null
+            val helloFrame = awaitFrame(it, input, key) ?: return
+            val client = if (helloFrame.size == REPORT_LEN) {
+                pending = helloFrame
+                identifyByAddress(it)
+            } else {
+                identifyFromHello(helloFrame, it)
+            }
+            if (client == null) return
+            if (client.status != LanClientStatus.AUTHORIZED) {
+                Log.w(
+                    TAG,
+                    "refused LAN session from ${client.displayName} (${client.address}) status=${client.status}"
+                )
+                if (client.status == LanClientStatus.PENDING) listener?.onClientPending(client)
+                runCatching { writeControl(output, key, "hello-ack", client.status) }
+                return
+            }
+            runCatching { writeControl(output, key, "hello-ack", client.status) }
+            Log.i(TAG, "LAN session authorized for ${client.displayName} (${client.address})")
+
             CtapHidEndpoint().use { endpoint ->
                 var authenticated = false
                 // The kernel endpoint has one global TX queue. Read network
@@ -90,7 +129,8 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
                 // complete HID request/response exchange. This keeps an idle
                 // LAN connection from blocking the local Credential Manager.
                 while (running && !it.isClosed) {
-                    val first = awaitFrame(it, input, key) ?: break
+                    val first = pending ?: awaitFrame(it, input, key) ?: break
+                    pending = null
                     if (first.size != REPORT_LEN) break
                     val request = readRequest(input, key, first)
                     if (!authenticated) {
@@ -123,6 +163,61 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
                 }
             }
         }
+    }
+
+    /**
+     * Read a client hello frame and look the machine up in the registry. The
+     * name and OS in the frame are untrusted, so they are clamped before they
+     * reach the list; the id has to be self-assigned hex, and a client that
+     * sends anything else is treated as unidentified.
+     */
+    private fun identifyFromHello(frame: ByteArray, socket: Socket): LanClientRecord? {
+        val text = runCatching { String(frame, Charsets.UTF_8) }.getOrNull()
+        val json = text?.let { runCatching { JSONObject(it) }.getOrNull() }
+        if (json == null || json.optString("t") != "hello") {
+            Log.w(TAG, "LAN client sent an unrecognized ${frame.size}-byte first frame")
+            return identifyByAddress(socket)
+        }
+        val id = LanClientRegistry.sanitizeId(json.optString("id"))
+            ?: return identifyByAddress(socket)
+        return registry.onHello(
+            id = id,
+            name = LanClientRegistry.sanitizeLabel(json.optString("name")),
+            os = LanClientRegistry.sanitizeLabel(json.optString("os"), maxLength = 24),
+            address = addressOf(socket),
+            autoAuthorize = settings.autoAuthorizeNewClients,
+        )
+    }
+
+    /** Fallback identity for an agent that never introduces itself. */
+    private fun identifyByAddress(socket: Socket): LanClientRecord {
+        val address = addressOf(socket)
+        return registry.onHello(
+            id = LanClientRecord.ADDRESS_ID_PREFIX + address,
+            name = "Computer at $address",
+            os = "",
+            address = address,
+            autoAuthorize = settings.autoAuthorizeNewClients,
+        )
+    }
+
+    private fun addressOf(socket: Socket): String =
+        socket.inetAddress?.hostAddress ?: "unknown"
+
+    /** Tell the agent what happened, so it can say so instead of just retrying. */
+    private fun writeControl(
+        output: DataOutputStream,
+        key: ByteArray,
+        type: String,
+        status: LanClientStatus,
+    ) {
+        val payload = JSONObject()
+            .put("t", type)
+            .put("status", status.name.lowercase())
+            .put("device", LanClientRegistry.sanitizeLabel("${Build.MANUFACTURER} ${Build.MODEL}"))
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        writeFrame(output, key, payload)
     }
 
     /**

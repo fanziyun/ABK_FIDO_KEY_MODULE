@@ -112,6 +112,12 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {
 		return err
 	}
 	defer conn.Close()
+	// Name this computer before any CTAP traffic. The phone refuses to relay
+	// for a machine the user has not authorized, and it says so here rather
+	// than by silently dropping requests later.
+	if err := sayHello(s); err != nil {
+		return err
+	}
 	subscription := hub.subscribe()
 	defer hub.unsubscribe(subscription)
 	writeErrors := make(chan error, 1)
@@ -204,9 +210,19 @@ func main() {
 		}
 		log.Printf("relay connected to %s", *phone)
 		if err := relay(conn, *pairing, hub); err != nil {
-			if errors.Is(err, io.EOF) {
+			switch {
+			case errors.Is(err, errAwaitingApproval):
+				log.Printf("this computer (%s) is waiting for approval: open the ABK FIDO app on the phone, "+
+					"go to LAN authorized devices, and allow it", clientName())
+				time.Sleep(5 * time.Second)
+				continue
+			case errors.Is(err, errBlocked):
+				log.Printf("this computer (%s) is blocked in the ABK FIDO app on the phone", clientName())
+				time.Sleep(30 * time.Second)
+				continue
+			case errors.Is(err, io.EOF):
 				log.Print("phone closed the relay session; reconnecting")
-			} else {
+			default:
 				log.Printf("session ended: %v", err)
 			}
 		}

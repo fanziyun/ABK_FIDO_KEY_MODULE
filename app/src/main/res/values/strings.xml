@@ -12,4 +12,96 @@
     <string name="auth_biometric_unavailable">No biometric verification available. FIDO request rejected.</string>
     <string name="auth_biometric_denied">Biometric verification failed. FIDO request rejected.</string>
     <string name="auth_prompt_launch_failed">Unable to launch biometric prompt. Opening ABK extension page.</string>
+
+    <string name="alert_channel_name">ABK FIDO alerts</string>
+    <string name="alert_pending_client_title">A computer wants to use the key</string>
+    <string name="alert_pending_client_text">%1$s is waiting for your approval</string>
+
+    <!-- Main screen -->
+    <string name="main_title">FIDO KEY</string>
+    <string name="main_subtitle">AnyBase Kernel</string>
+    <string name="master_switch_title">Use FIDO keys</string>
+    <string name="status_driver_missing">The abk_fido_key driver is not loaded.</string>
+    <string name="status_root_unavailable">Root access was denied. Key management needs root.</string>
+    <string name="status_keys">%1$d of %2$d slots used</string>
+    <string name="status_host_connected">Connected to a USB host</string>
+    <string name="status_host_waiting">Waiting for a USB host</string>
+    <string name="status_disabled">Websites are refused while this switch is off.</string>
+
+    <string name="section_wireless">Wireless</string>
+    <string name="wireless_switch_title">FIDO over Wi‑Fi</string>
+    <string name="wireless_switch_summary">Let an authorized computer on this network use the key</string>
+    <string name="pairing_code_title">Pairing code</string>
+    <string name="pairing_code_hidden">Tap to show the code a computer needs</string>
+    <string name="pairing_code_unavailable">Unavailable — needs root</string>
+    <string name="pairing_code_copied">Pairing code copied</string>
+    <string name="lan_clients_title">Authorized computers</string>
+    <string name="lan_clients_summary">%1$d authorized · %2$d waiting</string>
+    <string name="lan_clients_summary_none">No computer has connected yet</string>
+
+    <string name="section_keys">Registered FIDO keys</string>
+    <string name="keys_empty">No keys yet. Register one on a website, or import a key file.</string>
+    <string name="keys_unreadable">The key store could not be read.</string>
+    <string name="key_last_used">Last used: %1$s</string>
+    <string name="key_never_used">Never used</string>
+    <string name="key_menu_title">Options for %1$s</string>
+    <string name="key_menu_more">More options</string>
+    <string name="add_key_title">Add FIDO key</string>
+    <string name="add_key_message">Keys are created by the site you are signing up to: open the site, choose to add a security key, and approve it here. A key saved from another phone can be imported from a key file instead.</string>
+
+    <string name="section_backup">Backup</string>
+    <string name="export_all_title">Export all keys</string>
+    <string name="export_all_summary">Save an encrypted .abkfido file</string>
+    <string name="import_title">Import keys</string>
+    <string name="import_summary">Add keys from an .abkfido file</string>
+
+    <!-- Dialogs and results -->
+    <string name="action_cancel">Cancel</string>
+    <string name="action_save">Save</string>
+    <string name="action_close">Close</string>
+    <string name="action_copy">Copy code</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_export">Export</string>
+    <string name="action_import">Import</string>
+    <string name="action_rename">Rename</string>
+    <string name="rename_dialog_title">Rename key</string>
+    <string name="rename_field_name">Account name</string>
+    <string name="rename_field_display">Display name</string>
+    <string name="delete_dialog_title">Delete the key for %1$s?</string>
+    <string name="delete_dialog_message">The site will stop accepting this key, and it cannot be recovered unless you have exported it.</string>
+    <string name="passphrase_export_title">Protect the export</string>
+    <string name="passphrase_export_message">The file holds private keys, so it is always encrypted. Choose a passphrase to unlock it with later.</string>
+    <string name="passphrase_import_title">Open the key file</string>
+    <string name="passphrase_import_message">Enter the passphrase used when this file was exported.</string>
+    <string name="passphrase_field">Passphrase</string>
+    <string name="passphrase_confirm_field">Repeat passphrase</string>
+    <string name="passphrase_mismatch">The two passphrases do not match.</string>
+    <string name="passphrase_too_short">Use at least 8 characters.</string>
+    <string name="working">Working…</string>
+    <string name="export_done">Exported %1$d keys</string>
+    <string name="export_failed">Export failed: %1$s</string>
+    <string name="import_done">Imported %1$d keys, skipped %2$d already present</string>
+    <string name="import_nothing_new">Every key in that file is already on this phone</string>
+    <string name="import_failed">Import failed: %1$s</string>
+    <string name="rename_done">Key renamed</string>
+    <string name="delete_done">Key deleted</string>
+    <string name="edit_failed">%1$s</string>
+    <string name="root_needed">Root access is required for this.</string>
+    <string name="no_keys_to_export">There are no keys to export.</string>
+
+    <!-- Authorized computers screen -->
+    <string name="lan_title">Authorized computers</string>
+    <string name="lan_auto_title">Trust new computers</string>
+    <string name="lan_auto_summary">Authorize a computer as soon as it enters the pairing code</string>
+    <string name="lan_empty">No computer has connected yet. Run the desktop agent and enter the pairing code.</string>
+    <string name="lan_status_pending">Waiting for approval</string>
+    <string name="lan_status_authorized">Authorized</string>
+    <string name="lan_status_blocked">Blocked</string>
+    <string name="lan_client_detail">%1$s · %2$s</string>
+    <string name="lan_last_seen">last seen %1$s</string>
+    <string name="lan_menu_authorize">Authorize</string>
+    <string name="lan_menu_block">Block</string>
+    <string name="lan_menu_revoke">Revoke</string>
+    <string name="lan_menu_forget">Forget</string>
+    <string name="lan_anonymous_note">This computer runs an older agent and is recognized by its address only.</string>
 </resources>

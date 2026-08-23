@@ -138,6 +138,45 @@ assembled.
   to permissive mode.
 - The companion app mirrors the active blob into a SQLite database and keeps
   the SQLite mirror in `/metadata/abk_fido.db`.
+- `FidoSyncService` enforces the app's two switches: with **Use FIDO keys** off
+  it answers every pending authorization with a denial, and it only opens the
+  LAN listener when both **Use FIDO keys** and **FIDO over Wi‑Fi** are on. USB
+  remains the driver's own path and is unaffected by the wireless switch.
+
+## Companion app / 手机应用
+
+`app/` is both the background service and a full app. The launcher entry opens a
+single AOSP-style screen (`MainActivity`) that talks to the driver through root;
+the foreground service keeps owning root, policy and the biometric prompt, so
+closing the app changes nothing about how the key behaves.
+
+`app/` 既是后台服务，也是一个完整应用。桌面图标打开 `MainActivity`
+这一个 AOSP 风格页面，通过 root 与驱动交互；前台服务依旧负责 root、
+策略与生物识别弹窗，关闭界面不会影响钥匙的行为。
+
+- **Use FIDO keys** is the master switch. The driver's own `enabled` node is
+  read-only, so the switch is enforced in userspace instead: `auth_gate_enabled`
+  stays `1` and the service denies every request while the switch is off.
+- **FIDO over Wi‑Fi** starts and stops the LAN relay described below.
+- **Pairing code** shows the code from `/metadata/abk_fido_pairing_code` and
+  copies it to the clipboard.
+- **Authorized computers** is the LAN authorization list; a computer stays
+  refused until it is authorized here.
+- **Registered FIDO keys** lists the occupied slots of
+  `/metadata/abk_fido_store.bin`. Each row can be renamed, exported or deleted;
+  `Last used` comes from the app's own record of approvals, because the kernel
+  store has no room for a timestamp.
+- **Import** and **Export all keys** read and write an encrypted `.abkfido`
+  file. A slot carries its private key, so the archive is always sealed with
+  AES-256-GCM under a PBKDF2-HMAC-SHA256 passphrase (210 000 iterations, the
+  plaintext header as associated data).
+- Keys cannot be created from the app: a credential is minted by the site that
+  asks for one. **Add FIDO key** says so and offers the import path.
+
+Every edit rewrites the blob, resets magic, version and CRC-32 over
+`sign_count`..end, writes `1` to `restore_metadata`, and only reports success
+once `store_generation` has advanced and `credential_count` matches. A blob the
+driver rejects therefore surfaces as a failure instead of a silent no-op.
 
 ## Validation / 验证方式
 
@@ -256,3 +295,24 @@ The code is used as a PSK input to PBKDF2-HMAC-SHA256 and every frame is
 authenticated and encrypted with AES-GCM. Do not expose the listener outside a
 trusted LAN; rotate the code by deleting the metadata file and restarting the
 companion service.
+
+### Authorizing a computer / 授权电脑
+
+The pairing code only protects the transport, so the phone also keeps a list of
+the machines allowed to use the key. Right after the handshake the agent names
+itself with `{"t":"hello","id":…,"name":…,"os":…}`, where `id` is 16 random bytes
+generated once and kept in `<user config dir>/abk-fido/client-id`, and the phone
+replies with `{"t":"hello-ack","status":…}`:
+
+配对码只保护传输，因此手机还维护一份可以使用钥匙的电脑列表。
+
+- `authorized` — the session proceeds and CTAP traffic starts.
+- `pending` — a new computer. The phone posts a notification; open **Authorized
+  computers** in the app and allow it. The agent logs what to do and retries
+  every 5 s. Turning on **Authorize new computers automatically** on that screen
+  skips the prompt.
+- `blocked` — the computer was blocked in the app; the agent backs off to 30 s.
+
+Every session re-checks on hello, so revoking a computer takes effect on its
+next connection. An agent talking to a phone build that predates the handshake
+sees the session closed during hello and is told to update the app.

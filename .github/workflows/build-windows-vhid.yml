@@ -25,8 +25,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 64-bit MSBuild, because the WDK NuGet packages only ship 64-bit copies
+      # of some build tools. Their targets pick tool paths from
+      # %PROCESSOR_ARCHITECTURE% (drvcat) and the task DLLs load InfVerif.dll
+      # from a subdirectory named after the host process bitness, so a 32-bit
+      # MSBuild looks for an x86 drvcat.exe and x86\InfVerif.dll that are not
+      # in the package.
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
 
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2

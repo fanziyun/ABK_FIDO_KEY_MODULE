@@ -61,14 +61,14 @@ internal object RootShell {
             dst=${shellQuote(path)}
             if [ -e "${'$'}dst" ]; then
                 printf 'exists'
-                exit 0
+            else
+                parent=$(dirname "${'$'}dst")
+                mkdir -p "${'$'}parent"
+                touch "${'$'}dst"
+                chmod 0600 "${'$'}dst" 2>/dev/null || true
+                restorecon "${'$'}dst" 2>/dev/null || true
+                printf 'created'
             fi
-            parent=$(dirname "${'$'}dst")
-            mkdir -p "${'$'}parent"
-            touch "${'$'}dst"
-            chmod 0600 "${'$'}dst" 2>/dev/null || true
-            restorecon "${'$'}dst" 2>/dev/null || true
-            printf 'created'
             """.trimIndent()
         )
     }
@@ -101,26 +101,32 @@ internal object RootShell {
      * decoder straight into the device makes success depend on how base64
      * happens to flush its output. Stage the packet in a temp file, check the
      * decoded length, and let dd issue a single fixed-size write.
+     *
+     * The script must never call `exit`: that ends the shell before libsu can
+     * read the job's completion marker, which reports even a successful write
+     * as a failure. The trailing test carries the status instead.
      */
     fun writeDeviceBase64(path: String, payloadBase64: String): CommandResult = run(
         """
         tmp=/data/local/tmp/.abk_fido_tx.${'$'}${'$'}
-        if ! printf '%s' ${shellQuote(payloadBase64)} | base64 -d > "${'$'}tmp"; then
-            rm -f "${'$'}tmp"
+        status=0
+        if printf '%s' ${shellQuote(payloadBase64)} | base64 -d > "${'$'}tmp"; then
+            size=${'$'}(wc -c < "${'$'}tmp" | tr -d ' ')
+            if [ "${'$'}size" = '$DEVICE_PACKET_LEN' ]; then
+                if ! dd if="${'$'}tmp" of=${shellQuote(path)} bs=$DEVICE_PACKET_LEN count=1 2>/dev/null; then
+                    echo 'device rejected the packet'
+                    status=6
+                fi
+            else
+                echo "decoded ${'$'}size bytes, expected $DEVICE_PACKET_LEN"
+                status=5
+            fi
+        else
             echo 'base64 decode failed'
-            exit 4
+            status=4
         fi
-        size=${'$'}(wc -c < "${'$'}tmp" | tr -d ' ')
-        if [ "${'$'}size" != '$DEVICE_PACKET_LEN' ]; then
-            rm -f "${'$'}tmp"
-            echo "decoded ${'$'}size bytes, expected $DEVICE_PACKET_LEN"
-            exit 5
-        fi
-        dd if="${'$'}tmp" of=${shellQuote(path)} bs=$DEVICE_PACKET_LEN count=1 2>/dev/null
-        status=${'$'}?
         rm -f "${'$'}tmp"
-        [ "${'$'}status" = 0 ] || echo 'device write rejected the packet'
-        exit "${'$'}status"
+        [ "${'$'}status" = 0 ]
         """.trimIndent(),
         timeoutSeconds = 40L,
     )

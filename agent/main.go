@@ -158,9 +158,10 @@ func main() {
 	pairing := flag.String("pairing", "", "pairing code / PSK (required)")
 	phone := flag.String("phone", "", "phone LAN address, e.g. 192.168.1.20:38741 (auto-discovered when omitted)")
 	flag.Parse()
-	// Check the virtual-key backend before anything interactive: on Windows it
-	// is missing outright, and on Linux it needs root. Either way the user
-	// should learn that before the phone shows a pairing code.
+	// Check the virtual-key backend before anything interactive: it needs root
+	// on Linux, and on Windows it needs the abkfidovhid driver installed and an
+	// elevated prompt. Either way the user should learn that before the phone
+	// shows a pairing code.
 	if err := checkHIDBackend(); err != nil {
 		log.Fatal(err)
 	}

@@ -36,11 +36,26 @@ jobs:
       - name: Restore WDK packages
         run: nuget restore windows\vhid\packages.config -PackagesDirectory windows\vhid\packages
 
+      # WindowsDriver.Common.targets points InfToolPath at the WDK's x86 bin
+      # directory, but the NuGet package ships stampinf.exe only for x64 and
+      # ARM64. Without this override the build dies with
+      # "TRK0005: Failed to locate: stampinf.exe".
+      - name: Locate stampinf
+        shell: pwsh
+        run: |
+          $stamp = Get-ChildItem windows\vhid\packages -Recurse -File -Filter stampinf.exe |
+              Where-Object { $_.FullName -like '*\x64\*' } | Select-Object -First 1
+          if (-not $stamp) { throw 'stampinf.exe not found in the restored WDK packages' }
+          Write-Host "stampinf: $($stamp.FullName)"
+          "INF_TOOL_PATH=$($stamp.DirectoryName)" | Out-File $env:GITHUB_ENV -Append
+
       - name: Build driver
         run: >-
           msbuild windows\vhid\abkfidovhid.vcxproj
           -p:Configuration=Release -p:Platform=x64
           -p:TargetVersion=Windows10
+          -p:InfToolPath=$env:INF_TOOL_PATH
+          -p:InfToolArchitecture=Native64Bit
           -p:InfVerif_AdditionalOptions="/samples"
           -verbosity:minimal
 

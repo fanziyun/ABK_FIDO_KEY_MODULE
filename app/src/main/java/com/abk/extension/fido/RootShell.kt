@@ -95,8 +95,33 @@ internal object RootShell {
         )
     }
 
+    /**
+     * The kernel CTAP endpoint accepts exactly one [DEVICE_PACKET_LEN]-byte
+     * write per packet and returns EINVAL for any other length, so piping the
+     * decoder straight into the device makes success depend on how base64
+     * happens to flush its output. Stage the packet in a temp file, check the
+     * decoded length, and let dd issue a single fixed-size write.
+     */
     fun writeDeviceBase64(path: String, payloadBase64: String): CommandResult = run(
-        "printf '%s' ${shellQuote(payloadBase64)} | base64 -d > ${shellQuote(path)}",
+        """
+        tmp=/data/local/tmp/.abk_fido_tx.${'$'}${'$'}
+        if ! printf '%s' ${shellQuote(payloadBase64)} | base64 -d > "${'$'}tmp"; then
+            rm -f "${'$'}tmp"
+            echo 'base64 decode failed'
+            exit 4
+        fi
+        size=${'$'}(wc -c < "${'$'}tmp" | tr -d ' ')
+        if [ "${'$'}size" != '$DEVICE_PACKET_LEN' ]; then
+            rm -f "${'$'}tmp"
+            echo "decoded ${'$'}size bytes, expected $DEVICE_PACKET_LEN"
+            exit 5
+        fi
+        dd if="${'$'}tmp" of=${shellQuote(path)} bs=$DEVICE_PACKET_LEN count=1 2>/dev/null
+        status=${'$'}?
+        rm -f "${'$'}tmp"
+        [ "${'$'}status" = 0 ] || echo 'device write rejected the packet'
+        exit "${'$'}status"
+        """.trimIndent(),
         timeoutSeconds = 40L,
     )
 
@@ -225,4 +250,7 @@ internal object RootShell {
     private fun shellQuote(value: String): String {
         return "'" + value.replace("'", "'\\''") + "'"
     }
+
+    /** Fixed CTAP HID report size the kernel endpoint accepts per write. */
+    private const val DEVICE_PACKET_LEN = 64
 }

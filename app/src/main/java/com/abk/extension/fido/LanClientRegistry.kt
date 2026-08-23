@@ -28,7 +28,15 @@ internal class LanClientRecord(
     val lastSeen: Long,
     val sessions: Int,
 ) {
-    val displayName: String get() = name.ifBlank { "Unnamed computer" }
+    /** The name for a log line, where there is no context to translate with. */
+    val logName: String get() = name.ifBlank { "unnamed" }
+
+    /** The name to put on screen, so the fallback can be translated. */
+    fun displayName(context: Context): String = when {
+        name.isNotBlank() -> name
+        anonymous -> context.getString(R.string.lan_client_at_address, address)
+        else -> context.getString(R.string.lan_client_unnamed)
+    }
 
     /** True for a client that could not name itself, i.e. an older agent. */
     val anonymous: Boolean get() = id.startsWith(ADDRESS_ID_PREFIX)

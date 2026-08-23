@@ -1,5 +1,6 @@
 package com.abk.extension.fido
 
+import android.content.Context
 import java.util.zip.CRC32
 
 /**
@@ -202,8 +203,9 @@ internal class FidoCredentialRecord(
     val credIdHex: String get() = credId.joinToString("") { "%02x".format(it) }
 
     /** What the key list shows as the account this credential belongs to. */
-    val accountLabel: String
-        get() = userDisplay.ifBlank { userName }.ifBlank { "Unnamed account" }
+    fun accountLabel(context: Context): String =
+        userDisplay.ifBlank { userName }.ifBlank { context.getString(R.string.key_unnamed_account) }
 
-    val siteLabel: String get() = rpId.ifBlank { "Unknown site" }
+    fun siteLabel(context: Context): String =
+        rpId.ifBlank { context.getString(R.string.key_unknown_site) }
 }

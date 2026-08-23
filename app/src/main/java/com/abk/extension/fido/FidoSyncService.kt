@@ -174,7 +174,7 @@ class FidoSyncService : Service() {
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setContentTitle(getString(R.string.alert_pending_client_title))
-            .setContentText(getString(R.string.alert_pending_client_text, record.displayName))
+            .setContentText(getString(R.string.alert_pending_client_text, record.displayName(this)))
             .setContentIntent(pending)
             .setAutoCancel(true)
             .build()

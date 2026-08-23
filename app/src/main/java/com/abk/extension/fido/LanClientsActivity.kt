@@ -62,7 +62,7 @@ class LanClientsActivity : AppCompatActivity() {
 
     private fun addClientRow(record: LanClientRecord) {
         val row = layoutInflater.inflate(R.layout.item_lan_client, container, false)
-        row.findViewById<TextView>(R.id.clientName).text = record.displayName
+        row.findViewById<TextView>(R.id.clientName).text = record.displayName(this)
         row.findViewById<TextView>(R.id.clientStatus).text = getString(statusLabel(record.status))
         val lastSeen = if (record.lastSeen <= 0L) {
             ""
@@ -118,7 +118,7 @@ class LanClientsActivity : AppCompatActivity() {
      */
     private fun confirmForget(record: LanClientRecord) {
         MaterialAlertDialogBuilder(this)
-            .setTitle(record.displayName)
+            .setTitle(record.displayName(this))
             .setMessage(
                 if (record.anonymous) getString(R.string.lan_anonymous_note) else record.address
             )

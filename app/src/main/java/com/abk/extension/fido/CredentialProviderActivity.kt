@@ -23,7 +23,7 @@ class CredentialProviderActivity : Activity() {
             val getRequest = PendingIntentHandler.retrieveProviderGetCredentialRequest(intent)
             if (getRequest != null) {
                 val responseJson = runCatching { bridge.getAssertion(getRequest) }.getOrElse {
-                    finishWithError(it.message ?: "FIDO request failed"); return
+                    finishWithError(it.message ?: getString(R.string.provider_get_failed)); return
                 }
                 val result = Intent()
                 PendingIntentHandler.setGetCredentialResponse(result, GetCredentialResponse(PublicKeyCredential(responseJson)))
@@ -32,13 +32,13 @@ class CredentialProviderActivity : Activity() {
             val createRequest = PendingIntentHandler.retrieveProviderCreateCredentialRequest(intent)
             if (createRequest != null) {
                 val responseJson = runCatching { bridge.makeCredential(createRequest) }.getOrElse {
-                    finishWithCreateError(it.message ?: "FIDO creation failed"); return
+                    finishWithCreateError(it.message ?: getString(R.string.provider_create_failed)); return
                 }
                 val result = Intent()
                 PendingIntentHandler.setCreateCredentialResponse(result, CreatePublicKeyCredentialResponse(responseJson))
                 setResult(RESULT_OK, result); finish(); return
             }
-            finishWithError("Missing Credential Manager request")
+            finishWithError(getString(R.string.provider_request_missing))
         }
     }
 

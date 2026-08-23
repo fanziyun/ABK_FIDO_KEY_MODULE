@@ -26,6 +26,26 @@ func NewHID(device string) (HID, error) {
 		return nil, err
 	}
 	h := &linuxHID{f: u}
+	if _, err = u.Write(buildUHIDCreate2()); err != nil {
+		u.Close()
+		return nil, err
+	}
+	return h, nil
+}
+
+// UHID identity of the virtual key. uhid_create2_req stores the ids in u32
+// fields, but a HID vendor/product id is 16 bits everywhere else: the kernel
+// publishes them as `HID_ID=bus:vendor:product` in the hidraw uevent, and
+// Chromium (so Edge and Chrome) refuses to enumerate a hidraw node whose
+// HID_ID components do not fit in a u16. A wider value makes the device
+// invisible to every browser while libfido2, which truncates instead, keeps
+// working — exactly the split we saw with product 0xF1D02.
+const (
+	uhidVendorID  = 0xABCD
+	uhidProductID = 0x1D02
+)
+
+func buildUHIDCreate2() []byte {
 	name := [128]byte{}
 	copy(name[:], []byte("ABK FIDO2 Security Key"))
 	rd := []byte{0x06, 0xd0, 0xf1, 0x09, 0x01, 0xa1, 0x01, 0x09, 0x20, 0x15, 0, 0x26, 0xff, 0, 0x75, 8, 0x95, 0x40, 0x81, 2, 0x09, 0x21, 0x15, 0, 0x26, 0xff, 0, 0x75, 8, 0x95, 0x40, 0x91, 2, 0xc0}
@@ -35,15 +55,11 @@ func NewHID(device string) (HID, error) {
 	copy(b[4:], name[:])
 	binary.LittleEndian.PutUint16(b[4+256:], uint16(len(rd)))
 	binary.LittleEndian.PutUint16(b[4+258:], 0x03)
-	binary.LittleEndian.PutUint32(b[4+260:], 0xABCD)
-	binary.LittleEndian.PutUint32(b[4+264:], 0xF1D02)
+	binary.LittleEndian.PutUint32(b[4+260:], uhidVendorID)
+	binary.LittleEndian.PutUint32(b[4+264:], uhidProductID)
 	binary.LittleEndian.PutUint32(b[4+268:], 1)
 	copy(b[4+276:], rd)
-	if _, err = u.Write(b); err != nil {
-		u.Close()
-		return nil, err
-	}
-	return h, nil
+	return b
 }
 func (h *linuxHID) Close() error { return h.f.Close() }
 func (h *linuxHID) Read() ([]byte, error) {

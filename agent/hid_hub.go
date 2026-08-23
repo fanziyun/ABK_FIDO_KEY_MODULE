@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
+	"log"
 	"sync"
 )
 
@@ -76,6 +78,7 @@ func (h *hidHub) run() error {
 		if len(packet) != 64 {
 			continue
 		}
+		logHostFrame(packet)
 
 		h.mu.Lock()
 		active := h.active
@@ -95,6 +98,21 @@ func (h *hidHub) run() error {
 }
 
 const maxPendingPackets = 64
+
+// logHostFrame reports the start of every transaction the USB host begins.
+// Only initialization packets are logged (a CTAP message is one init packet
+// plus continuations), so a whole makeCredential produces a single line. It is
+// the only way to tell "the browser never touched the key" apart from "the key
+// answered and the browser rejected the answer".
+func logHostFrame(packet []byte) {
+	command := packet[4]
+	if command&0x80 == 0 {
+		return
+	}
+	log.Printf("host frame cid=%08x cmd=0x%02x len=%d",
+		binary.BigEndian.Uint32(packet[:4]), command,
+		binary.BigEndian.Uint16(packet[5:7]))
+}
 
 func (h *hidHub) write(s *hidSubscription, packet []byte) error {
 	if len(packet) != 64 {

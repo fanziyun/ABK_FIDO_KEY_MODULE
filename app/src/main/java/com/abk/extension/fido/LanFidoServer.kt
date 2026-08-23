@@ -6,6 +6,7 @@ import java.io.DataOutputStream
 import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.security.SecureRandom
@@ -73,6 +74,10 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
     private fun serve(socket: Socket) {
         socket.use {
             it.soTimeout = HANDSHAKE_TIMEOUT_MS
+            // The desktop agent stays connected but silent whenever the USB host
+            // is not talking to the key, so rely on TCP keepalive to reap dead
+            // peers instead of a short read timeout.
+            runCatching { it.keepAlive = true }
             val input = DataInputStream(it.getInputStream()); val output = DataOutputStream(it.getOutputStream())
             val clientNonce = ByteArray(16); input.readFully(clientNonce)
             val serverNonce = ByteArray(16); SecureRandom().nextBytes(serverNonce); output.write(serverNonce); output.flush()
@@ -85,7 +90,7 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
                 // complete HID request/response exchange. This keeps an idle
                 // LAN connection from blocking the local Credential Manager.
                 while (running && !it.isClosed) {
-                    val first = readFrame(input, key) ?: break
+                    val first = awaitFrame(it, input, key) ?: break
                     if (first.size != REPORT_LEN) break
                     val request = readRequest(input, key, first)
                     if (!authenticated) {
@@ -118,6 +123,26 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
                 }
             }
         }
+    }
+
+    /**
+     * Wait for the first frame of the next request, tolerating idle periods.
+     * The desktop agent only sends when the USB host issues a CTAP request, so
+     * a read timeout with no frame started means "still idle", not "failed".
+     * A timeout once the frame has started is a real protocol failure and is
+     * propagated by [readFrame].
+     */
+    private fun awaitFrame(socket: Socket, input: DataInputStream, key: ByteArray): ByteArray? {
+        while (running && !socket.isClosed) {
+            val firstLengthByte = try {
+                input.read()
+            } catch (_: SocketTimeoutException) {
+                continue
+            }
+            if (firstLengthByte < 0) return null
+            return readFrame(input, key, firstLengthByte)
+        }
+        return null
     }
 
     /** Read one complete HID request, including continuation packets. */
@@ -265,10 +290,19 @@ internal class LanFidoServer(private val pairingCode: String, private val port: 
         return out
     }
 
-    private fun readFrame(input: DataInputStream, key: ByteArray): ByteArray? {
-        val len = input.readInt(); if (len !in 1..4096) return null
+    private fun readFrame(input: DataInputStream, key: ByteArray, firstLengthByte: Int = -1): ByteArray? {
+        val len = if (firstLengthByte < 0) input.readInt() else readIntTail(input, firstLengthByte)
+        if (len !in 1..4096) return null
         val nonce = ByteArray(12); input.readFully(nonce); val body = ByteArray(len); input.readFully(body)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce)); return cipher.doFinal(body)
+    }
+
+    /** Complete a big-endian length whose most significant byte was already read. */
+    private fun readIntTail(input: DataInputStream, firstLengthByte: Int): Int {
+        val rest = ByteArray(3)
+        input.readFully(rest)
+        return ((firstLengthByte and 0xff) shl 24) or ((rest[0].toInt() and 0xff) shl 16) or
+            ((rest[1].toInt() and 0xff) shl 8) or (rest[2].toInt() and 0xff)
     }
 
     private fun writeFrame(output: DataOutputStream, key: ByteArray, payload: ByteArray) {

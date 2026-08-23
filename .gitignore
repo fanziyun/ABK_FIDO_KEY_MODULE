@@ -32,3 +32,10 @@ local.properties
 # Python
 __pycache__/
 *.pyc
+
+# Windows driver build (restored WDK packages and msbuild output)
+windows/vhid/packages/
+windows/**/x64/
+*.sys
+*.cat
+*.cer

@@ -1,9 +1,9 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <!--
-    Deliberately plain: no WDK, no NuGet, no toolset or SDK version pinned, so
-    it builds with whatever Visual Studio the machine has. The tool only needs
-    setupapi/newdev/cfgmgr32, all of which ship in the Windows SDK.
+    Deliberately plain: no WDK and no NuGet, and the toolset follows whatever
+    Visual Studio the machine has rather than a pinned version. The tool only
+    needs setupapi/newdev/cfgmgr32, all of which ship in the Windows SDK.
   -->
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -24,6 +24,8 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
+    <!-- Without this the toolset falls back to v100 (Visual Studio 2010). -->
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <UseDebugLibraries Condition="'$(Configuration)' == 'Debug'">true</UseDebugLibraries>
     <UseDebugLibraries Condition="'$(Configuration)' != 'Debug'">false</UseDebugLibraries>

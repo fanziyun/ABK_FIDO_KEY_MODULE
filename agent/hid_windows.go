@@ -8,51 +8,70 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"syscall"
 )
 
-// vhidPipe is the contract between this agent and a Windows virtual-HID
-// backend: whoever serves the pipe must accept 64-byte CTAP reports written by
-// the host and hand back 64-byte device replies, framed exactly like the Linux
-// uhid path. Windows has no in-box equivalent of /dev/uhid, and browsers there
-// reach a security key through the Windows WebAuthn stack, which enumerates
-// real HID devices only, so the LAN relay cannot work on Windows until such a
-// backend (a signed HID minidriver plus its user-mode service) is installed.
-// None ships with this project yet.
-const vhidPipe = `\\.\pipe\abk-fido-vhid`
+// syscall does not name this one, and the agent has no third-party dependencies
+// to borrow it from.
+const errorSharingViolation = syscall.Errno(32)
+
+// vhidDevice is the control device that windows/vhid/abkfidovhid.sys exposes.
+// The driver is a KMDF function driver over the Virtual HID Framework: reports
+// this agent writes here are submitted to the HID stack as device-to-host input
+// reports, and host-to-device output reports arrive as reads - the same 64-byte
+// CTAP framing the Linux /dev/uhid path uses.
+//
+// Its security descriptor only admits SYSTEM and Administrators, so the agent
+// has to run elevated.
+const vhidDevice = `\\.\ABKFidoVhid`
+
+// installHint points at the packaged installer rather than describing the
+// SetupAPI dance, because the devnode also needs a trusted certificate and test
+// signing, and Install-AbkFidoVhid.ps1 checks all three.
+const installHint = `Install the virtual HID driver first: from an elevated PowerShell prompt, run
+.\Install-AbkFidoVhid.ps1 in the abk-fido-vhid package (the "Build Windows
+Virtual HID Driver" workflow artifact). The package is self-signed, so the
+machine also needs test signing on (bcdedit /set testsigning on), which requires
+Secure Boot to be disabled. Run .\abkvhidctl.exe status to see where it stands.
+
+Alternatively, connect the phone over USB: it is a native FIDO HID key there and
+needs no driver on Windows.`
 
 type windowsHID struct{ f *os.File }
 
-// checkHIDBackend runs before discovery and pairing so a missing backend is
-// reported as the setup problem it is, instead of surfacing a bare
+// checkHIDBackend runs before discovery and pairing so a missing or unusable
+// driver is reported as the setup problem it is, instead of surfacing a bare
 // ERROR_FILE_NOT_FOUND after the user has already read a pairing code off the
 // phone.
 func checkHIDBackend() error {
-	f, err := os.OpenFile(vhidPipe, os.O_RDWR, 0)
+	f, err := os.OpenFile(vhidDevice, os.O_RDWR, 0)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf(`no virtual HID backend is listening on %s.
-
-Windows browsers only see a security key through a real HID device, and this
-project does not ship the HID minidriver that would serve that pipe, so the LAN
-relay has nothing to attach to. Use one of these instead:
-  * connect the phone over USB - the gadget is a native FIDO HID key there and
-    Windows needs no driver for it;
-  * run the agent on Linux, where /dev/uhid provides the virtual key;
-  * install a virtual-HID backend that serves %s and start it first.`,
-				vhidPipe, vhidPipe)
-		}
-		return err
+		return describeOpenError(err)
 	}
 	return f.Close()
 }
 
+func describeOpenError(err error) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%s does not exist.\n\n%s", vhidDevice, installHint)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("%s refused access: the agent has to run elevated (try `sudo` or an "+
+			"administrator prompt).", vhidDevice)
+	case errors.Is(err, errorSharingViolation):
+		return fmt.Errorf("%s is already open: the driver admits one client at a time, so another "+
+			"agent is still running.", vhidDevice)
+	}
+	return err
+}
+
 func NewHID(device string) (HID, error) {
 	if device == "" {
-		device = vhidPipe
+		device = vhidDevice
 	}
 	f, err := os.OpenFile(device, os.O_RDWR, 0)
 	if err != nil {
-		return nil, err
+		return nil, describeOpenError(err)
 	}
 	return &windowsHID{f: f}, nil
 }

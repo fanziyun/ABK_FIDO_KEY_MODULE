@@ -68,6 +68,12 @@ func (h *linuxHID) Read() ([]byte, error) {
 
 // parseUHIDOutput extracts a complete 64-byte host output report. It returns
 // ready=false for valid non-output UHID events, which callers should ignore.
+//
+// hidraw keeps the report-number byte that userspace prepends (0x00 for a
+// device whose reports are unnumbered, which is what CTAP HID uses) and the HID
+// core forwards the buffer to uhid untouched, so a 64-byte CTAP frame arrives
+// here as 65 bytes. Strip that prefix; without it every relayed frame is
+// shifted by one byte and the authenticator sees garbage.
 func parseUHIDOutput(event []byte) ([]byte, bool, error) {
 	if len(event) < 4 {
 		return nil, false, fmt.Errorf("short UHID event")
@@ -85,18 +91,25 @@ func parseUHIDOutput(event []byte) ([]byte, bool, error) {
 	if len(event) < sizeOffset+3 || event[sizeOffset+2] != uhidOutputReport {
 		return nil, false, nil
 	}
-	if size < 64 {
+	data := event[4:]
+	if size > len(data) {
+		return nil, false, fmt.Errorf("UHID output size %d exceeds event", size)
+	}
+	if size > reportLen && data[0] == 0 {
+		data = data[1:]
+		size--
+	}
+	if size < reportLen {
 		return nil, false, fmt.Errorf("short HID output: %d", size)
 	}
-	if len(event) < 4+64 {
-		return nil, false, fmt.Errorf("short UHID output data")
-	}
-	return append([]byte(nil), event[4:4+64]...), true, nil
+	return append([]byte(nil), data[:reportLen]...), true, nil
 }
 func (h *linuxHID) Write(p []byte) error {
-	if len(p) != 64 {
+	if len(p) != reportLen {
 		return fmt.Errorf("invalid HID packet length: %d", len(p))
 	}
+	// Input reports carry no report-number prefix: the device is unnumbered, so
+	// the host expects exactly the 64 CTAP bytes.
 	b := make([]byte, 4+2+4096)
 	binary.LittleEndian.PutUint32(b, uint32(uhidInput2))
 	binary.LittleEndian.PutUint16(b[4:6], uint16(len(p)))

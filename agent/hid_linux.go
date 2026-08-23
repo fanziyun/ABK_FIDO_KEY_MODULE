@@ -18,10 +18,31 @@ const (
 	uhidDestroy      = 1
 )
 
+const uhidPath = "/dev/uhid"
+
 type linuxHID struct{ f *os.File }
 
+// checkHIDBackend verifies the virtual-key backend is usable before the relay
+// asks for a pairing code. Creating the device is the only step that needs
+// root, and finding that out after the phone has displayed a pairing code
+// wastes the code and the user's trip to the phone. The probe only opens and
+// closes /dev/uhid, so no virtual key exists until NewHID writes CREATE2.
+func checkHIDBackend() error {
+	f, err := os.OpenFile(uhidPath, os.O_RDWR, 0)
+	if err != nil {
+		switch {
+		case os.IsPermission(err):
+			return fmt.Errorf("%s needs root; re-run the agent with sudo", uhidPath)
+		case os.IsNotExist(err):
+			return fmt.Errorf("%s is missing; load the kernel module with `sudo modprobe uhid`", uhidPath)
+		}
+		return err
+	}
+	return f.Close()
+}
+
 func NewHID(device string) (HID, error) {
-	u, err := os.OpenFile("/dev/uhid", os.O_RDWR, 0)
+	u, err := os.OpenFile(uhidPath, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
 	}

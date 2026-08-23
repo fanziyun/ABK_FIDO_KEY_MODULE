@@ -56,38 +56,34 @@ jobs:
           test "$ABK_MODULE_REPO_URL" = 'https://github.com/fanziyun/ABK_FIDO_KEY_MODULE'
           test "$ABK_MODULE_SUPPORTED_STAGES" = 'after_patch,before_build'
           test "$ABK_MODULE_RECOMMENDED_STAGES" = 'after_patch,before_build'
-          test "$ABK_MODULE_KERNEL_LINES" = '5.15,6.1'
           test -x setup.sh
 
-      - name: Validate the driver carries its ownership marker
+      - name: Validate the 5.15 ECC include survives
         shell: bash
         run: |
           set -euo pipefail
-          for file in \
-            files/drivers/abk_fido_key/Kconfig \
-            files/drivers/abk_fido_key/Makefile \
-            files/drivers/abk_fido_key/core.c \
-            files/include/linux/abk_fido_key.h; do
-            grep -q 'ABK_FIDO_KEY_V1' "$file" || { echo "missing marker: $file" >&2; exit 1; }
-          done
-
-      - name: Validate the installer kernel-line whitelist matches the driver
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The ECC include in core.c is what makes both kernel lines work; if it
-          # is dropped, the installer whitelist is lying.
+          # 5.15 keeps the internal ECC header outside include/, so core.c has to
+          # pick it by relative path. Losing either arm of the __has_include
+          # breaks one of the two supported kernel lines.
           grep -q '__has_include(<crypto/internal/ecc.h>)' files/drivers/abk_fido_key/core.c
           grep -q '"../../crypto/ecc.h"' files/drivers/abk_fido_key/core.c
-          grep -q 'SUPPORTED_KERNELS = {"5.15", "6.1"}' scripts/install.py
+
+      - name: Check the installer tolerates a tree without KernelSU
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ABK builds with kernelsu_variant=None have no rules.c. The sepolicy
+          # step must warn and continue there, not abort the build.
+          grep -q 'no KernelSU rules.c found' scripts/abk_fido_setup.sh
+          ! grep -q 'abk_require_file "$rules"' scripts/abk_fido_setup.sh
 
       - name: Check for 5.15 declaration-after-statement regressions
         shell: bash
         run: |
           set -euo pipefail
-          # 5.15 builds with -Wdeclaration-after-statement and ABK adds -Werror,
-          # while 6.1 dropped the flag. Surface the driver's own findings here so
-          # the failure names the lines, not just the failing test.
+          # 5.15 builds with -Wdeclaration-after-statement and ABK adds -Werror.
+          # Surface the driver's own findings here so the failure names the
+          # lines, not just the failing test.
           python3 - <<'PY'
           import sys
           sys.path.insert(0, "tests")

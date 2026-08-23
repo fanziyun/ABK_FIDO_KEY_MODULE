@@ -24,7 +24,12 @@ internal class WebAuthnCtapBridge(private val hid: CtapHidEndpoint) {
         val allowCredentials: List<ByteArray> = o.optJSONArray("allowCredentials")?.let { array ->
             (0 until array.length()).map { index ->
                 val credential = array.getJSONObject(index)
-                CborWriter().map(1).int(1).bytes(b64(credential.getString("id"))).build()
+                // CTAP2 credential descriptors use text keys, unlike the
+                // integer-keyed getAssertion request itself.
+                CborWriter().map(2)
+                    .text("type").text("public-key")
+                    .text("id").bytes(b64(credential.getString("id")))
+                    .build()
             }
         } ?: emptyList()
         val req = CborWriter().map(4)

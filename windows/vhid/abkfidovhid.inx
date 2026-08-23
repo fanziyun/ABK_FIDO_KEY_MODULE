@@ -1,0 +1,80 @@
+;/*++
+;
+;Module Name:
+;
+;    abkfidovhid.inf
+;
+;Abstract:
+;    Installs the ABK FIDO virtual HID driver on the root-enumerated devnode
+;    root\ABKFIDOVHID. The devnode itself has to be created first (there is no
+;    hardware to detect it), which is what abkvhidctl.exe install does.
+;
+;--*/
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ProviderString%
+DriverVer   = 01/01/2026,1.0.0.0
+CatalogFile = abkfidovhid.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskDesc%,,,
+
+[SourceDisksFiles]
+abkfidovhid.sys = 1
+
+; ================= Device section =====================
+
+[Manufacturer]
+%ManufacturerString% = ABK,NT$ARCH$.10.0
+
+[ABK.NT$ARCH$.10.0]
+%DeviceDesc% = abkfidovhid, root\ABKFIDOVHID
+
+[abkfidovhid.NT]
+CopyFiles = DriverCopy
+
+[abkfidovhid.NT.HW]
+AddReg = abkfidovhid_HW_AddReg
+
+; Vhf.sys must sit below this driver in the stack: it is the in-box half of the
+; Virtual HID Framework and it is what enumerates the HID child device that the
+; Windows WebAuthn stack ends up talking to.
+[abkfidovhid_HW_AddReg]
+HKR,,"LowerFilters",0x00010000,"vhf"
+
+[abkfidovhid.NT.Services]
+AddService = abkfidovhid,0x2,abkfidovhid_Service_Inst
+
+[abkfidovhid_Service_Inst]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1                       ; SERVICE_KERNEL_DRIVER
+StartType     = 3                       ; SERVICE_DEMAND_START
+ErrorControl  = 1                       ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\abkfidovhid.sys
+
+[abkfidovhid.NT.Wdf]
+KmdfService = abkfidovhid, abkfidovhid_wdfsect
+
+[abkfidovhid_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+; ================= copy files =====================
+
+[DriverCopy]
+abkfidovhid.sys
+
+;---------------------------------------------------------------;
+
+[Strings]
+ProviderString     = "ABK FIDO Key Module"
+ManufacturerString = "ABK FIDO Key Module"
+DeviceDesc         = "ABK FIDO Virtual HID Device"
+ServiceDesc        = "ABK FIDO Virtual HID Driver"
+DiskDesc           = "ABK FIDO Virtual HID Installation Disk"

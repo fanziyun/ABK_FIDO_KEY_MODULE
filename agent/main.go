@@ -105,24 +105,41 @@ func (s *session) write(p []byte) error {
 	return err
 }
 
-func relay(conn net.Conn, pairing string, hid HID) error {
+func relay(conn net.Conn, pairing string, hub *hidHub) error {
 	s, err := newSession(conn, pairing)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	subscription := hub.subscribe()
+	defer hub.unsubscribe(subscription)
+	writeErrors := make(chan error, 1)
 	go func() {
 		for {
-			p, e := hid.Read()
-			if e != nil {
+			select {
+			case <-subscription.done:
+				// A newer authenticated session owns the UHID stream now. Close
+				// this socket so the old relay cannot remain blocked in s.read().
+				_ = conn.Close()
 				return
-			}
-			if len(p) == 64 {
-				_ = s.write(p)
+			case p := <-subscription.packets:
+				if e := s.write(p); e != nil {
+					select {
+					case writeErrors <- e:
+					default:
+					}
+					_ = conn.Close()
+					return
+				}
 			}
 		}
 	}()
 	for {
+		select {
+		case err := <-writeErrors:
+			return err
+		default:
+		}
 		p, e := s.read()
 		if e != nil {
 			return e
@@ -130,7 +147,7 @@ func relay(conn net.Conn, pairing string, hid HID) error {
 		if len(p) != 64 {
 			return errors.New("invalid CTAP packet")
 		}
-		if e = hid.Write(p); e != nil {
+		if e = hub.write(subscription, p); e != nil {
 			return e
 		}
 	}
@@ -161,6 +178,12 @@ func main() {
 		log.Fatal(err)
 	}
 	defer hid.Close()
+	hub := newHIDHub(hid)
+	go func() {
+		if err := hub.run(); err != nil {
+			log.Printf("UHID reader stopped: %v", err)
+		}
+	}()
 	for {
 		conn, err := net.DialTimeout("tcp", *phone, 10*time.Second)
 		if err != nil {
@@ -168,7 +191,7 @@ func main() {
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		if err := relay(conn, *pairing, hid); err != nil {
+		if err := relay(conn, *pairing, hub); err != nil {
 			log.Printf("session ended: %v", err)
 		}
 		time.Sleep(time.Second)

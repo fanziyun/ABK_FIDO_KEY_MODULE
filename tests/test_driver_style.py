@@ -64,6 +64,23 @@ def _mask_comments_and_literals(text: str) -> str:
     return _C_LEXEME.sub(blank, text)
 
 
+_BRACKETED = re.compile(r"\[[^\[\]]*\]")
+
+
+def _blank_array_dimensions(head: str) -> str:
+    """Blank `[...]` contents so an array bound is not read as a call.
+
+    `u8 buf[1 + sizeof(other)];` is a declaration, but its dimension holds a
+    parenthesis. Innermost brackets are collapsed repeatedly so nested bounds
+    such as `[SIZE(a[0])]` are handled too.
+    """
+    while True:
+        collapsed = _BRACKETED.sub(lambda match: " " * len(match.group()), head)
+        if collapsed == head:
+            return collapsed
+        head = collapsed
+
+
 def _is_declaration(line: str) -> bool:
     if _KEYWORD_STATEMENT.match(line):
         return False
@@ -73,7 +90,7 @@ def _is_declaration(line: str) -> bool:
         return False
     # `int foo(void);` is a prototype and `ret = f(x);` is a call, not a
     # declaration of a local. Require the statement to end in a declarator.
-    head = line.split("=", 1)[0]
+    head = _blank_array_dimensions(line.split("=", 1)[0])
     return "(" not in head
 
 
@@ -254,6 +271,36 @@ class DeclarationAfterStatementTest(unittest.TestCase):
             "}\n"
         )
         self.assertEqual(find_declarations_after_statements(macro), [])
+
+    def test_detector_allows_computed_array_bounds_before_declarations(self) -> None:
+        # An array bound may contain a call-like expression; the declaration must
+        # not be mistaken for a statement, or every later local is flagged.
+        computed = (
+            "static int f(void)\n"
+            "{\n"
+            "\tu8 inner_payload[128];\n"
+            "\tu8 response_payload[1 + sizeof(inner_payload)];\n"
+            "\tu8 nested[ARRAY_SIZE(response_payload[0])];\n"
+            "\tint ret;\n"
+            "\n"
+            "\tret = g(response_payload, nested);\n"
+            "\treturn ret;\n"
+            "}\n"
+        )
+        self.assertEqual(find_declarations_after_statements(computed), [])
+
+    def test_detector_still_flags_calls_before_declarations(self) -> None:
+        # The bracket blanking must not swallow a real statement.
+        broken = (
+            "static int f(void)\n"
+            "{\n"
+            "\tret = memset(buf[0], 0, sizeof(buf));\n"
+            "\tint ret;\n"
+            "\n"
+            "\treturn ret;\n"
+            "}\n"
+        )
+        self.assertEqual([line for line, _ in find_declarations_after_statements(broken)], [4])
 
 
 if __name__ == "__main__":

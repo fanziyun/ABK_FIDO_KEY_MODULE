@@ -1,0 +1,83 @@
+name: Build Windows Virtual HID Driver
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "windows/**"
+      - ".github/workflows/build-windows-vhid.yml"
+  push:
+    branches:
+      - "**"
+    paths:
+      - "windows/**"
+      - ".github/workflows/build-windows-vhid.yml"
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      # The WDK comes from NuGet rather than an MSI install, so the runner needs
+      # no WDK of its own and the toolchain version is pinned by packages.config.
+      - name: Restore WDK packages
+        run: nuget restore windows\vhid\packages.config -PackagesDirectory windows\vhid\packages
+
+      - name: Build driver
+        run: >-
+          msbuild windows\vhid\abkfidovhid.vcxproj
+          -p:Configuration=Release -p:Platform=x64
+          -p:TargetVersion=Windows10
+          -p:InfVerif_AdditionalOptions="/samples"
+          -verbosity:minimal
+
+      - name: Build abkvhidctl
+        run: >-
+          msbuild windows\tools\abkvhidctl\abkvhidctl.vcxproj
+          -p:Configuration=Release -p:Platform=x64
+          -verbosity:minimal
+
+      # The build's own test signature only exists to let the WDK finish; the
+      # package is re-signed here with a certificate this script exports, so the
+      # machine that installs it has something to trust.
+      - name: Package and test-sign
+        # Windows PowerShell, not pwsh: New-SelfSignedCertificate comes from the
+        # in-box PKI module, which PowerShell 7 can only reach through its
+        # compatibility layer.
+        shell: powershell
+        run: >-
+          windows\scripts\Sign-Package.ps1
+          -SearchRoot windows\vhid\x64\Release
+          -OutDir dist\abk-fido-vhid
+
+      - name: Collect tool and installers
+        shell: pwsh
+        run: |
+          $ctl = Get-ChildItem -Path windows\tools\abkvhidctl -Filter abkvhidctl.exe -Recurse -File |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $ctl) { throw 'abkvhidctl.exe not found' }
+          Copy-Item -LiteralPath $ctl.FullName -Destination dist\abk-fido-vhid -Force
+          Copy-Item -Path windows\scripts\Install-AbkFidoVhid.ps1,windows\scripts\Uninstall-AbkFidoVhid.ps1 `
+              -Destination dist\abk-fido-vhid -Force
+          Get-ChildItem dist\abk-fido-vhid | Select-Object Name,Length
+
+      - name: Upload driver package
+        uses: actions/upload-artifact@v4
+        with:
+          name: abk-fido-vhid-x64
+          path: dist/abk-fido-vhid/**
+          if-no-files-found: error
+

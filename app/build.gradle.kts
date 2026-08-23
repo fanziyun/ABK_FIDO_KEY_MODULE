@@ -64,4 +64,7 @@ dependencies {
     // Android 14+ Credential Manager provider bridge used by browser/passkey flows.
     implementation("androidx.credentials:credentials:1.5.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
+    // app/src/test carries the CTAP diagnostic codec tests; without this the
+    // unit-test variant does not compile.
+    testImplementation("junit:junit:4.13.2")
 }

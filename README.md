@@ -74,6 +74,10 @@ What it adds / 它会增加这些内容:
   configfs injection point.
 - `app/`, `build.gradle.kts`, `settings.gradle.kts`: minimal Android companion
   app project for the metadata-backed SQLite mirror.
+- `agent/`: Go desktop bridge that relays CTAP frames from the phone to a local
+  virtual HID device (`/dev/uhid` on Linux, `\\.\ABKFidoVhid` on Windows).
+- `windows/`: the `abkfidovhid` virtual HID driver, `abkvhidctl.exe`, and the
+  PowerShell packaging and install scripts the Windows agent depends on.
 
 ## Integration / 接入方式
 
@@ -191,8 +195,8 @@ assembled.
   approval flow.
 - `agent/` contains a Go desktop bridge. Linux creates a `/dev/uhid` virtual
   FIDO HID device; the LAN session uses pairing-code-derived AES-GCM frames.
-  Windows keeps the HID backend isolated behind the same interface for a VHID
-  service implementation.
+  Windows reaches the same interface through `\\.\ABKFidoVhid`, the control
+  device of the `windows/vhid` driver.
 - Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `clientPIN`
   (minimal), `reset`, and `selection`.
 - Persists the kernel-side FIDO store blob at `/metadata/abk_fido_store.bin`.
@@ -295,15 +299,16 @@ grep -E 'CONFIG_ABK_FIDO_KEY=|CONFIG_CRYPTO_ECC=' "$DEFCONFIG"
 - The job is skipped on forks, because signing secrets are not inherited and an
   unsigned asset is worse than none. Add the four secrets above and run the
   workflow manually (`workflow_dispatch`) to publish from a fork.
-- `app/` is unchanged in this fork and the companion is kernel-version
-  independent, so `ABK_EXTENSION_COMPANION_DOWNLOAD_URL` in `module.conf` still
-  points at the upstream signed release. Repoint it after publishing here.
+- `ABK_EXTENSION_COMPANION_DOWNLOAD_URL` in `module.conf` still points at the
+  upstream signed release: this fork adds a diagnostics screen but no change the
+  kernel module depends on, and only upstream publishes a signed asset. Repoint
+  it after publishing here.
 
 - 该 job 在 fork 上会跳过，因为签名 secret 不会被继承，发一个未签名的产物比不发更糟。
   想从 fork 发布，需要自己配置上面四个 secret 并手动触发 `workflow_dispatch`。
-- 本 fork 没有改动 `app/`，且 companion 与内核版本无关，所以 `module.conf` 里的
-  `ABK_EXTENSION_COMPANION_DOWNLOAD_URL` 仍指向上游已签名的 release。
-  等这里自己发布后再改指向。
+- `module.conf` 里的 `ABK_EXTENSION_COMPANION_DOWNLOAD_URL` 仍指向上游已签名的
+  release：本 fork 只额外加了诊断界面，没有内核模块依赖的改动，而且只有上游会发布
+  已签名产物。等这里自己发布后再改指向。
 
 ## Development / 开发
 
@@ -327,6 +332,16 @@ rollback, and every rejection path. They do not compile a kernel.
 测试使用只包含安装器关心的锚点的合成内核树，覆盖 5.15 与 6.1 两种布局，校验接线、
 注入、幂等、回滚以及所有拒绝路径；但不编译内核。
 
+The desktop agent and the companion app carry their own tests, which need a Go
+toolchain and the Android SDK respectively:
+
+desktop agent 与 companion app 各自带测试，分别需要 Go 工具链与 Android SDK：
+
+```bash
+(cd agent && go test ./...)
+./gradlew testDebugUnitTest assembleDebug
+```
+
 ## Metadata / 元数据
 
 Public module metadata lives in `module.conf` and is intended to match the
@@ -337,6 +352,7 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 
 ## Current Limits / 当前边界
 
+- No Windows Hello support.
 - No CTAP1/U2F `MSG` handling. `U2F_V2` is advertised in `getInfo`, but the
   transport only implements CTAP2 `CBOR`.
 - The kernel waits up to 30 s for a decision while the companion's prompt times
@@ -351,8 +367,16 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 - The installer validates source anchors and defconfig state. It does not
   compile, link, or boot a kernel, so a passing `verify` is not evidence that the
   build succeeds or the device works.
-- Windows native HID requires an installed VHID backend; the Go agent's
-  transport and protocol are platform independent.
+- The LAN relay needs a virtual HID device on the desktop, and creating one is
+  privileged on both platforms: on Linux the agent uses `/dev/uhid` and must run
+  as root; on Windows it needs the `abkfidovhid` driver from
+  [Windows virtual HID driver](#windows-virtual-hid-driver--windows-虚拟-hid-驱动)
+  installed and must run elevated. That driver is self-signed here, so the
+  machine has to have test signing on (which means Secure Boot off) — if that is
+  not acceptable, connect the phone over USB instead, where the gadget is a
+  native FIDO HID key that needs no driver.
+  局域网中转在 Windows 上需要安装本仓库的 `abkfidovhid` 虚拟 HID 驱动，并开启测试签名
+  （需关闭安全启动）；若不便如此，请改用 USB 连接手机。
 
 - 不支持 Windows Hello。
 - 没有实现 CTAP1/U2F 的 `MSG`；`getInfo` 里虽然声明了 `U2F_V2`，传输层只处理
@@ -365,7 +389,47 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
   这是 5.15 支持之前就存在的问题，6.1 上行为相同。
 - 安装器只校验源码锚点和 defconfig 状态，不编译、不链接、不启动内核；
   `verify` 通过不等于能编译成功或设备可用。
-- Windows 原生 HID 需要安装 VHID 后端；Go agent 的传输与协议与平台无关。
+
+## Windows virtual HID driver / Windows 虚拟 HID 驱动
+
+Windows WebAuthn only enumerates real HID devices, so `windows/` contains the
+driver that gives the LAN relay something for browsers to find:
+
+- `windows/vhid/` — `abkfidovhid.sys`, a KMDF function driver built on the
+  Virtual HID Framework (`vhf.sys` is added as a lower filter). It publishes a
+  CTAP HID device (usage page `0xF1D0`, 64-byte input and output reports) and
+  the control device `\\.\ABKFidoVhid`, whose security descriptor admits only
+  SYSTEM and Administrators. The WDK comes from the NuGet packages pinned in
+  `packages.config`, so no machine-wide WDK install is required.
+- `windows/tools/abkvhidctl/` — `abkvhidctl.exe`, which creates, inspects and
+  removes the root-enumerated devnode the driver binds to (`abkvhidctl install
+  <inf>` / `remove` / `status`). `pnputil` cannot invent a devnode for hardware
+  that does not exist, which is what a software-only HID source needs.
+- `windows/scripts/` — `Sign-Package.ps1` (packages and test-signs with a
+  freshly generated self-signed certificate), plus
+  `Install-AbkFidoVhid.ps1` / `Uninstall-AbkFidoVhid.ps1`.
+
+`.github/workflows/build-windows-vhid.yml` builds and test-signs all of it on
+`windows-latest` and uploads the `abk-fido-vhid-x64` artifact. To install, from
+an elevated PowerShell prompt in the extracted artifact:
+
+```powershell
+.\Install-AbkFidoVhid.ps1 -EnableTestSigning   # reboot, then run it again
+.\abkvhidctl.exe status
+```
+
+The certificate is generated on the machine that runs the build, so a
+self-signed package will only load while test signing is on; the installer
+checks Secure Boot and the test-signing flag and reports what is missing instead
+of changing boot configuration on its own. Devnode problem code 52 means the
+signature was rejected. Then run the agent elevated, as usual:
+
+```powershell
+sudo .\abk-fido-agent-windows-amd64.exe
+```
+
+To back it all out: `.\Uninstall-AbkFidoVhid.ps1 -RemoveDriverPackage
+-RemoveCertificate`, then `bcdedit /set testsigning off`.
 
 ## LAN pairing / 局域网配对
 

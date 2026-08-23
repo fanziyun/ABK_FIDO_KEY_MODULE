@@ -61,14 +61,14 @@ object RootShell {
             dst=${shellQuote(path)}
             if [ -e "${'$'}dst" ]; then
                 printf 'exists'
-                exit 0
+            else
+                parent=$(dirname "${'$'}dst")
+                mkdir -p "${'$'}parent"
+                touch "${'$'}dst"
+                chmod 0600 "${'$'}dst" 2>/dev/null || true
+                restorecon "${'$'}dst" 2>/dev/null || true
+                printf 'created'
             fi
-            parent=$(dirname "${'$'}dst")
-            mkdir -p "${'$'}parent"
-            touch "${'$'}dst"
-            chmod 0600 "${'$'}dst" 2>/dev/null || true
-            restorecon "${'$'}dst" 2>/dev/null || true
-            printf 'created'
             """.trimIndent()
         )
     }
@@ -95,14 +95,48 @@ object RootShell {
         )
     }
 
+    /**
+     * The kernel CTAP endpoint accepts exactly one [DEVICE_PACKET_LEN]-byte
+     * write per packet and returns EINVAL for any other length, so piping the
+     * decoder straight into the device makes success depend on how base64
+     * happens to flush its output. Stage the packet in a temp file, check the
+     * decoded length, and let dd issue a single fixed-size write.
+     *
+     * The script must never call `exit`: that ends the shell before libsu can
+     * read the job's completion marker, which reports even a successful write
+     * as a failure. The trailing test carries the status instead.
+     */
     fun writeDeviceBase64(path: String, payloadBase64: String): CommandResult = run(
-        "printf '%s' ${shellQuote(payloadBase64)} | base64 -d > ${shellQuote(path)}",
+        """
+        tmp=/data/local/tmp/.abk_fido_tx.${'$'}${'$'}
+        status=0
+        if printf '%s' ${shellQuote(payloadBase64)} | base64 -d > "${'$'}tmp"; then
+            size=${'$'}(wc -c < "${'$'}tmp" | tr -d ' ')
+            if [ "${'$'}size" = '$DEVICE_PACKET_LEN' ]; then
+                if ! dd if="${'$'}tmp" of=${shellQuote(path)} bs=$DEVICE_PACKET_LEN count=1 2>/dev/null; then
+                    echo 'device rejected the packet'
+                    status=6
+                fi
+            else
+                echo "decoded ${'$'}size bytes, expected $DEVICE_PACKET_LEN"
+                status=5
+            fi
+        else
+            echo 'base64 decode failed'
+            status=4
+        fi
+        rm -f "${'$'}tmp"
+        [ "${'$'}status" = 0 ]
+        """.trimIndent(),
         timeoutSeconds = 40L,
     )
 
     fun readDeviceBase64(path: String, count: Int, timeoutSeconds: Long): CommandResult = run(
-        "dd if=${shellQuote(path)} bs=$count count=1 2>/dev/null | base64 | tr -d '\\n'",
-        timeoutSeconds,
+        // Keep the child command cancellable as well as the libsu job. A
+        // plain blocking dd can survive a Java thread interrupt and become a
+        // stale reader of the shared CTAP TX queue.
+        "set -o pipefail; timeout ${timeoutSeconds}s dd if=${shellQuote(path)} bs=$count count=1 2>/dev/null | base64",
+        timeoutSeconds + 2,
     )
 
     fun copyFileToMetadata(srcPath: String, dstPath: String): CommandResult {
@@ -222,4 +256,7 @@ object RootShell {
     private fun shellQuote(value: String): String {
         return "'" + value.replace("'", "'\\''") + "'"
     }
+
+    /** Fixed CTAP HID report size the kernel endpoint accepts per write. */
+    private const val DEVICE_PACKET_LEN = 64
 }

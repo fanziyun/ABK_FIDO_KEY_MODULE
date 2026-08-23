@@ -35,3 +35,10 @@ __pycache__/
 
 # IDE
 .idea/
+
+# Windows driver build (restored WDK packages and msbuild output)
+windows/vhid/packages/
+windows/**/x64/
+*.sys
+*.cat
+*.cer

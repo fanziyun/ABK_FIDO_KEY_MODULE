@@ -46,7 +46,7 @@ class AbkCredentialProviderService : CredentialProviderService() {
         callback: OutcomeReceiver<BeginCreateCredentialResponse, CreateCredentialException>,
     ) {
         if (request.type != PublicKeyCredential.TYPE_PUBLIC_KEY_CREDENTIAL) {
-            callback.onError(CreateCredentialUnknownException("Unsupported credential type"))
+            callback.onError(CreateCredentialUnknownException(getString(R.string.provider_type_unsupported)))
             return
         }
         callback.onResult(
@@ -54,7 +54,7 @@ class AbkCredentialProviderService : CredentialProviderService() {
                 CreateEntry(
                     accountName = getString(R.string.app_name),
                     pendingIntent = activityIntent(2000),
-                    description = "ABK kernel FIDO authenticator",
+                    description = getString(R.string.provider_entry_description),
                 )
             ).build()
         )

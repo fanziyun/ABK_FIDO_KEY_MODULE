@@ -15,12 +15,12 @@ val hasReleaseSigning = listOf(
 
 android {
     namespace = "com.abk.extension.fido"
-    compileSdk = 37
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.abk.extension.fido"
         minSdk = 26
-        targetSdk = 37
+        targetSdk = 35
         versionCode = 1
         versionName = "0.2.0"
     }
@@ -64,7 +64,6 @@ dependencies {
     // Android 14+ Credential Manager provider bridge used by browser/passkey flows.
     implementation("androidx.credentials:credentials:1.5.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
-    // app/src/test carries the CTAP diagnostic codec tests; without this the
-    // unit-test variant does not compile.
+
     testImplementation("junit:junit:4.13.2")
 }

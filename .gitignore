@@ -42,3 +42,6 @@ windows/**/x64/
 *.sys
 *.cat
 *.cer
+
+# Go agent build output
+agent/abk-fido-agent

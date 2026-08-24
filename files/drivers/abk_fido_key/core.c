@@ -25,7 +25,6 @@
 #include <linux/namei.h>
 #include <linux/poll.h>
 #include <linux/random.h>
-#include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
@@ -39,8 +38,8 @@
 
 #include <asm/unaligned.h>
 
-#include <crypto/ecdh.h>
 #include <crypto/ecc_curve.h>
+#include <crypto/ecdh.h>
 #include <crypto/hash.h>
 /*
  * The internal ECC header moved in v5.16: 5.15 keeps it at crypto/ecc.h, which
@@ -57,7 +56,6 @@
 #  include <crypto/internal/ecc.h>
 #endif
 #include <crypto/sha2.h>
-#include <crypto/skcipher.h>
 
 #include "../usb/gadget/u_f.h"
 
@@ -70,9 +68,27 @@
 #define ABK_FIDO_MAX_USER_ID			64
 #define ABK_FIDO_MAX_USER_NAME			64
 #define ABK_FIDO_MAX_CREDS			32
+/* excludeList / allowList entries kept per request. Matching the store size
+ * means a client can name every credential the key holds, so the exclusion
+ * check never silently ignores an entry.
+ */
+#define ABK_FIDO_MAX_CRED_LIST			ABK_FIDO_MAX_CREDS
+/* What clients are told to batch. 32 ids of 32 bytes plus the rest of a
+ * makeCredential request would crowd ABK_FIDO_MAX_MSG, so advertise half the
+ * parser's capacity and stay well inside the transport budget.
+ */
+#define ABK_FIDO_MAX_CRED_LIST_ADVERTISED	(ABK_FIDO_MAX_CRED_LIST / 2)
 #define ABK_FIDO_MAX_CBOR			1536
 #define ABK_FIDO_MAX_SIG_DER			80
-#define ABK_FIDO_AUTH_CACHE_MS			10000
+/* A successful local approval is reusable for this long, and a failed one blocks
+ * everything for the same span.
+ */
+#define ABK_FIDO_AUTH_CACHE_MS			3000
+#define ABK_FIDO_AUTH_DENY_MS			3000
+/* How long a multi-credential getAssertion stays continuable through
+ * authenticatorGetNextAssertion, per CTAP2.
+ */
+#define ABK_FIDO_ASSERT_WINDOW_MS		30000
 #define ABK_FIDO_STORE_PATH			"/metadata/abk_fido_store.bin"
 #define ABK_FIDO_STORE_MAGIC			0x41424646
 #define ABK_FIDO_STORE_VERSION			1
@@ -110,35 +126,43 @@
 #define ABK_FIDO_CTAP_ERR_TIMEOUT		0x05
 #define ABK_FIDO_CTAP_ERR_CBOR_UNEXPECTED_TYPE	0x11
 #define ABK_FIDO_CTAP_ERR_INVALID_CBOR		0x12
+#define ABK_FIDO_CTAP_ERR_INVALID_COMMAND	0x01
 #define ABK_FIDO_CTAP_ERR_MISSING_PARAMETER	0x14
 #define ABK_FIDO_CTAP_ERR_LIMIT_EXCEEDED	0x15
 #define ABK_FIDO_CTAP_ERR_CREDENTIAL_EXCLUDED	0x19
 #define ABK_FIDO_CTAP_ERR_UNSUPPORTED_ALGORITHM	0x26
 #define ABK_FIDO_CTAP_ERR_OPERATION_DENIED	0x27
 #define ABK_FIDO_CTAP_ERR_KEY_STORE_FULL	0x28
+#define ABK_FIDO_CTAP_ERR_NOT_ALLOWED		0x30
 #define ABK_FIDO_CTAP_ERR_UNSUPPORTED_OPTION	0x2b
+#define ABK_FIDO_CTAP_ERR_INVALID_OPTION	0x2c
 #define ABK_FIDO_CTAP_ERR_NO_CREDENTIALS	0x2e
-#define ABK_FIDO_CTAP_ERR_PIN_INVALID		0x31
-#define ABK_FIDO_CTAP_ERR_PIN_BLOCKED		0x32
-#define ABK_FIDO_CTAP_ERR_PIN_AUTH_INVALID	0x33
+/* This key has no client PIN: user verification is the phone's own biometric
+ * or screen lock, so a PIN based pinUvAuthParam is always rejected.
+ */
 #define ABK_FIDO_CTAP_ERR_PIN_NOT_SET		0x35
+#define ABK_FIDO_CTAP_ERR_UP_REQUIRED		0x39
+
+/* The response helpers can only hand an errno back to the CBOR dispatcher, so
+ * the few CTAP specific outcomes travel as these aliases. Keeping them in one
+ * place is the only way the mapping stays readable.
+ */
+#define ABK_FIDO_ERR_INVALID_COMMAND		(-ENOSYS)
+#define ABK_FIDO_ERR_PIN_NOT_SET		(-ENOKEY)
+#define ABK_FIDO_ERR_INVALID_OPTION		(-EBADRQC)
+#define ABK_FIDO_ERR_UP_REQUIRED		(-EPROTO)
+#define ABK_FIDO_ERR_NOT_ALLOWED		(-EBADSLT)
 
 #define ABK_FIDO_CTAP_MAKE_CREDENTIAL		0x01
 #define ABK_FIDO_CTAP_GET_ASSERTION		0x02
 #define ABK_FIDO_CTAP_GET_INFO			0x04
 #define ABK_FIDO_CTAP_CLIENT_PIN		0x06
 #define ABK_FIDO_CTAP_RESET			0x07
-#define ABK_FIDO_CTAP_SELECTION		0x0b
-
-#define ABK_FIDO_CLIENT_PIN_GET_RETRIES		0x01
-#define ABK_FIDO_CLIENT_PIN_GET_KEY_AGREEMENT	0x02
-#define ABK_FIDO_CLIENT_PIN_SET_PIN		0x03
-#define ABK_FIDO_CLIENT_PIN_CHANGE_PIN		0x04
-#define ABK_FIDO_CLIENT_PIN_GET_PIN_TOKEN	0x05
+#define ABK_FIDO_CTAP_GET_NEXT_ASSERTION	0x08
+#define ABK_FIDO_CTAP_SELECTION			0x0b
 
 #define ABK_FIDO_COSE_KTY_EC2			2
 #define ABK_FIDO_COSE_ALG_ES256			(-7)
-#define ABK_FIDO_COSE_ALG_ECDH_ES_HKDF_256	(-25)
 #define ABK_FIDO_COSE_CRV_P256			1
 
 #define ABK_FIDO_CRED_FLAG_UP			0x01
@@ -239,17 +263,14 @@ struct abk_cbor_writer {
 	int err;
 };
 
-struct abk_fido_pin_key_agreement {
-	bool present;
-	u8 pub_key[64];
-};
-
 struct abk_fido_make_cred_req {
 	bool have_client_data_hash;
 	bool have_rp_id;
 	bool have_user_id;
 	bool rk;
 	bool uv;
+	bool up_disabled;
+	bool pin_auth_present;
 	u8 client_data_hash[32];
 	char rp_id[ABK_FIDO_MAX_RP_ID];
 	u8 user_id[ABK_FIDO_MAX_USER_ID];
@@ -260,7 +281,7 @@ struct abk_fido_make_cred_req {
 		bool present;
 		u8 id[32];
 		size_t len;
-	} exclude[8];
+	} exclude[ABK_FIDO_MAX_CRED_LIST];
 	unsigned int exclude_count;
 };
 
@@ -268,23 +289,16 @@ struct abk_fido_get_assert_req {
 	bool have_client_data_hash;
 	bool have_rp_id;
 	bool uv;
+	bool up_disabled;
+	bool pin_auth_present;
 	u8 client_data_hash[32];
 	char rp_id[ABK_FIDO_MAX_RP_ID];
 	struct {
 		bool present;
 		u8 id[32];
 		size_t len;
-	} allow[8];
+	} allow[ABK_FIDO_MAX_CRED_LIST];
 	unsigned int allow_count;
-};
-
-struct abk_fido_client_pin_req {
-	u8 protocol;
-	u8 subcommand;
-	struct abk_fido_pin_key_agreement key_agreement;
-	struct abk_fido_slice pin_auth;
-	struct abk_fido_slice new_pin_enc;
-	struct abk_fido_slice pin_hash_enc;
 };
 
 struct abk_fido_usb;
@@ -303,7 +317,6 @@ struct abk_fido_device {
 	char last_error[160];
 	char last_trace[256];
 	wait_queue_head_t auth_wait;
-	bool auth_gate_enabled;
 	bool auth_pending;
 	bool auth_decided;
 	bool auth_allowed;
@@ -312,13 +325,22 @@ struct abk_fido_device {
 	bool auth_pending_uv;
 	bool auth_pending_rk;
 	char auth_pending_rp_id[ABK_FIDO_MAX_RP_ID];
+	/* Grant window opened by the last approval. */
 	bool auth_cache_valid;
 	unsigned long auth_cache_expires;
+	/* Cooldown window opened by the last refusal. */
+	bool auth_deny_valid;
+	unsigned long auth_deny_expires;
+	/* Continuation state for authenticatorGetNextAssertion. */
+	bool assert_valid;
+	unsigned long assert_expires;
+	unsigned int assert_count;
+	unsigned int assert_next;
+	u8 assert_slots[ABK_FIDO_MAX_CREDS];
+	u8 assert_client_data_hash[32];
+	char assert_rp_id[ABK_FIDO_MAX_RP_ID];
 	u8 *store_blob_staging;
 	size_t store_blob_staging_len;
-	u8 pin_agreement_priv[32];
-	u8 pin_agreement_pub[64];
-	bool pin_agreement_valid;
 	struct abk_fido_usb *usb;
 	struct kobject *kobj;
 };
@@ -782,44 +804,6 @@ static ssize_t abk_fido_kernel_write(struct file *file, const void *buf, size_t 
 	return ret;
 }
 
-static int abk_fido_aes256_cbc(bool encrypt, const u8 key[32], u8 *buf, size_t len)
-{
-	struct crypto_skcipher *tfm;
-	struct skcipher_request *req;
-	DECLARE_CRYPTO_WAIT(wait);
-	struct scatterlist sg;
-	u8 iv[16] = {};
-	int ret;
-
-	if (!len || (len % 16))
-		return -EINVAL;
-
-	tfm = crypto_alloc_skcipher("cbc(aes)", 0, 0);
-	if (IS_ERR(tfm))
-		return PTR_ERR(tfm);
-
-	ret = crypto_skcipher_setkey(tfm, key, 32);
-	if (ret)
-		goto out_tfm;
-
-	req = skcipher_request_alloc(tfm, GFP_KERNEL);
-	if (!req) {
-		ret = -ENOMEM;
-		goto out_tfm;
-	}
-
-	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_SLEEP,
-				      crypto_req_done, &wait);
-	sg_init_one(&sg, buf, len);
-	skcipher_request_set_crypt(req, &sg, &sg, len, iv);
-	ret = crypto_wait_req(encrypt ? crypto_skcipher_encrypt(req)
-				      : crypto_skcipher_decrypt(req), &wait);
-	skcipher_request_free(req);
-out_tfm:
-	crypto_free_skcipher(tfm);
-	return ret;
-}
-
 static void abk_fido_digits_from_bytes(const u8 *bytes, size_t len,
 				       u64 *digits, unsigned int ndigits)
 {
@@ -858,22 +842,9 @@ static void abk_fido_p256_scalar_to_bytes(const u64 *digits, u8 out[32])
 	memcpy(out, digits, 32);
 }
 
-static void abk_fido_p256_scalar_from_bytes(const u8 bytes[32], u64 *digits)
-{
-	abk_fido_digits_from_bytes(bytes, 32, digits, ECC_CURVE_NIST_P256_DIGITS);
-}
-
 static void abk_fido_p256_pub_to_bytes(const u64 *digits, u8 out[64])
 {
 	memcpy(out, digits, 64);
-}
-
-static void abk_fido_p256_pub_from_bytes(const u8 bytes[64], u64 *digits)
-{
-	abk_fido_digits_from_bytes(bytes, 32, digits, ECC_CURVE_NIST_P256_DIGITS);
-	abk_fido_digits_from_bytes(bytes + 32, 32,
-				   digits + ECC_CURVE_NIST_P256_DIGITS,
-				   ECC_CURVE_NIST_P256_DIGITS);
 }
 
 static u64 abk_fido_vli_add(u64 *result, const u64 *left, const u64 *right,
@@ -1342,24 +1313,6 @@ static unsigned int abk_fido_count_credentials_locked(void)
 	return count;
 }
 
-static bool abk_fido_bytes_all_zero(const u8 *buf, size_t len)
-{
-	size_t i;
-
-	for (i = 0; i < len; i++) {
-		if (buf[i] != 0)
-			return false;
-	}
-	return true;
-}
-
-static bool abk_fido_pin_configured_locked(void)
-{
-	return abk_fido_dev.store.pin_set &&
-	       !abk_fido_bytes_all_zero(abk_fido_dev.store.pin_hash,
-					sizeof(abk_fido_dev.store.pin_hash));
-}
-
 static u32 abk_fido_store_crc32(const struct abk_fido_store_disk *disk)
 {
 	u32 crc;
@@ -1490,15 +1443,17 @@ static void abk_fido_finalize_restored_store_locked(const char *success_trace)
 	abk_fido_dev.store_dirty = false;
 	abk_fido_dev.last_error[0] = '\0';
 
-	if (abk_fido_dev.store.pin_set &&
-	    !abk_fido_pin_configured_locked()) {
+	/* Legacy stores may carry client PIN state from before this key became
+	 * biometric only. Drop it so nothing can be verified against it.
+	 */
+	if (abk_fido_dev.store.pin_set) {
 		abk_fido_dev.store.pin_set = false;
+		memset(abk_fido_dev.store.pin_hash, 0,
+		       sizeof(abk_fido_dev.store.pin_hash));
 		abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
 		abk_fido_dev.store_dirty = true;
-		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
-			 "invalid pin state recovered");
 		abk_fido_set_last_trace_locked(
-			"%s; cleared invalid pin state", success_trace);
+			"%s; dropped legacy pin state", success_trace);
 		return;
 	}
 
@@ -1788,13 +1743,41 @@ static const char *abk_fido_ctap_name(u8 cmd)
 	}
 }
 
+/* A refused or unanswered prompt blocks every further request for a short
+ * while, so a wrong finger or a cancelled dialog cannot be retried in a tight
+ * loop by whatever is on the other end of the cable.
+ */
+static void abk_fido_auth_start_cooldown_locked(void)
+{
+	abk_fido_dev.auth_cache_valid = false;
+	abk_fido_dev.auth_deny_valid = true;
+	abk_fido_dev.auth_deny_expires = jiffies +
+		msecs_to_jiffies(ABK_FIDO_AUTH_DENY_MS);
+}
+
 static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, bool rk)
 {
 	long wait_ret;
 	u32 request_id;
 
-	if (!abk_fido_dev.auth_gate_enabled)
-		return 0;
+	/* Every operation that can release key material has to be approved
+	 * locally; there is no switch that turns this off. The only shortcut is
+	 * the short grant window opened by the previous approval.
+	 */
+	if (abk_fido_dev.auth_deny_valid) {
+		if (time_before(jiffies, abk_fido_dev.auth_deny_expires)) {
+			abk_fido_set_last_trace_locked(
+				"auth cooldown reject cmd=%s rp=%s",
+				abk_fido_ctap_name(ctap_cmd), rp_id);
+			snprintf(abk_fido_dev.last_error,
+				 sizeof(abk_fido_dev.last_error),
+				 "auth cooldown active");
+			pr_info("abk_fido_key: auth cooldown reject cmd=%s rp=%s\n",
+				abk_fido_ctap_name(ctap_cmd), rp_id);
+			return -EPERM;
+		}
+		abk_fido_dev.auth_deny_valid = false;
+	}
 	if (abk_fido_dev.auth_cache_valid &&
 	    time_before(jiffies, abk_fido_dev.auth_cache_expires)) {
 		abk_fido_set_last_trace_locked(
@@ -1804,6 +1787,7 @@ static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, b
 			abk_fido_ctap_name(ctap_cmd), rp_id);
 		return 0;
 	}
+	abk_fido_dev.auth_cache_valid = false;
 
 	request_id = ++abk_fido_dev.auth_request_id;
 	abk_fido_dev.auth_pending = true;
@@ -1842,6 +1826,7 @@ static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, b
 	if (!wait_ret) {
 		abk_fido_dev.auth_pending = false;
 		abk_fido_dev.auth_decided = false;
+		abk_fido_auth_start_cooldown_locked();
 		abk_fido_set_last_trace_locked(
 			"auth timeout req=%u cmd=%s", request_id,
 			abk_fido_ctap_name(ctap_cmd));
@@ -1854,6 +1839,7 @@ static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, b
 	abk_fido_dev.auth_pending = false;
 	abk_fido_dev.auth_decided = false;
 	if (!abk_fido_dev.auth_allowed) {
+		abk_fido_auth_start_cooldown_locked();
 		abk_fido_set_last_trace_locked(
 			"auth denied req=%u cmd=%s", request_id,
 			abk_fido_ctap_name(ctap_cmd));
@@ -1866,6 +1852,7 @@ static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, b
 	abk_fido_set_last_trace_locked(
 		"auth allowed req=%u cmd=%s", request_id,
 		abk_fido_ctap_name(ctap_cmd));
+	abk_fido_dev.auth_deny_valid = false;
 	abk_fido_dev.auth_cache_valid = true;
 	abk_fido_dev.auth_cache_expires = jiffies + msecs_to_jiffies(ABK_FIDO_AUTH_CACHE_MS);
 	pr_info("abk_fido_key: auth allowed req=%u cmd=%s\n",
@@ -1922,43 +1909,6 @@ static int abk_fido_encode_cose_key(const u8 pub_key[64], s64 alg,
 	return 0;
 }
 
-static int abk_fido_decode_cose_key(struct abk_cbor_reader *r, u8 pub_key[64])
-{
-	u64 count, i;
-	bool have_x = false, have_y = false;
-
-	if (abk_cbor_read_map(r, &count))
-		return -EINVAL;
-
-	for (i = 0; i < count; i++) {
-		s64 key;
-		struct abk_fido_slice slice;
-
-		if (abk_cbor_read_int(r, &key))
-			return -EINVAL;
-		switch (key) {
-		case -2:
-			if (abk_cbor_read_bytes(r, &slice) || slice.len != 32)
-				return -EINVAL;
-			memcpy(pub_key, slice.ptr, 32);
-			have_x = true;
-			break;
-		case -3:
-			if (abk_cbor_read_bytes(r, &slice) || slice.len != 32)
-				return -EINVAL;
-			memcpy(pub_key + 32, slice.ptr, 32);
-			have_y = true;
-			break;
-		default:
-			if (abk_cbor_skip(r))
-				return -EINVAL;
-			break;
-		}
-	}
-
-	return (have_x && have_y) ? 0 : -EINVAL;
-}
-
 static int abk_fido_make_authdata_attested(struct abk_fido_credential *cred,
 					   u8 flags, u32 sign_count,
 					   u8 *out, size_t *out_len)
@@ -1991,15 +1941,18 @@ static int abk_fido_make_authdata_assert(const char *rp_id,
 	return 0;
 }
 
-static bool abk_fido_is_windows_select_device_make_credential(struct abk_fido_make_cred_req *req)
+/* Windows' device selection ceremony and Chromium's touch collector both send a
+ * makeCredential that is never meant to produce a credential. Windows uses
+ * rp.id = user.name = "SelectDevice" (webauthn.dll, _SelectDevice in
+ * webauthnctap.cpp, with user.id = 11 22 33 44 55 44 33 22 11 and alg -7);
+ * Chromium uses rp.id = ".dummy". Both only want the touch, and both read the
+ * reply as an ordinary CTAP2 makeCredential response.
+ */
+static bool abk_fido_is_selection_make_credential(struct abk_fido_make_cred_req *req)
 {
-	return !strcmp(req->rp_id, "SelectDevice") &&
-	       !strcmp(req->user_name, "SelectDevice");
-}
-
-static bool abk_fido_is_webauthn_dummy_make_credential(struct abk_fido_make_cred_req *req)
-{
-	return !strcmp(req->rp_id, ".dummy") && !strcmp(req->user_name, "dummy");
+	return (!strcmp(req->rp_id, "SelectDevice") &&
+		!strcmp(req->user_name, "SelectDevice")) ||
+	       (!strcmp(req->rp_id, ".dummy") && !strcmp(req->user_name, "dummy"));
 }
 
 static int abk_fido_encode_dummy_make_credential_cbor(u8 *payload,
@@ -2028,127 +1981,8 @@ static int abk_fido_encode_dummy_make_credential_cbor(u8 *payload,
 	return 0;
 }
 
-static int abk_fido_make_windows_select_device_resp(struct abk_fido_make_cred_req *req,
-						    u8 *payload, size_t *payload_len)
-{
-	struct abk_cbor_writer w;
-	u8 inner_payload[128];
-	u8 response_payload[1 + sizeof(inner_payload)];
-	u8 zero_aaguid[16] = { 0 };
-	size_t inner_payload_len = 0;
-	int ret;
-
-	mutex_lock(&abk_fido_dev.lock);
-	ret = abk_fido_load_store_locked();
-	if (ret && ret != -ENOENT)
-		goto out_unlock;
-
-	abk_fido_set_last_trace_locked(
-		"windows selectDevice rp=%s user=%s uv=%u",
-		req->rp_id, req->user_name, req->uv);
-	pr_info("abk_fido_key: windows selectDevice rp=%s user=%s uv=%u\n",
-		req->rp_id, req->user_name, req->uv);
-
-	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_MAKE_CREDENTIAL,
-					 req->rp_id, req->uv, false);
-	if (ret)
-		goto out_unlock;
-
-	ret = abk_fido_encode_dummy_make_credential_cbor(inner_payload,
-							 &inner_payload_len);
-	if (ret)
-		goto out_unlock;
-
-	response_payload[0] = ABK_FIDO_CTAP_SUCCESS;
-	memcpy(response_payload + 1, inner_payload, inner_payload_len);
-
-	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
-	abk_cbor_put_map(&w, 3);
-	abk_cbor_put_text(&w, "deviceInfo");
-	abk_cbor_put_map(&w, 30);
-	abk_cbor_put_text(&w, "providerType");
-	abk_cbor_put_text(&w, "Hid");
-	abk_cbor_put_text(&w, "providerName");
-	abk_cbor_put_text(&w, "ABK FIDO");
-	abk_cbor_put_text(&w, "devicePath");
-	abk_cbor_put_text(&w, "usb:abk-fido");
-	abk_cbor_put_text(&w, "manufacturer");
-	abk_cbor_put_text(&w, "ABK");
-	abk_cbor_put_text(&w, "product");
-	abk_cbor_put_text(&w, "ABK FIDO");
-	abk_cbor_put_text(&w, "u2fProtocol");
-	abk_cbor_put_bool(&w, true);
-	abk_cbor_put_text(&w, "u2fAppId");
-	abk_cbor_put_bool(&w, true);
-	abk_cbor_put_text(&w, "aaGuid");
-	abk_cbor_put_bytes(&w, zero_aaguid, sizeof(zero_aaguid));
-	abk_cbor_put_text(&w, "pinStatus");
-	abk_cbor_put_uint(&w, 1);
-	abk_cbor_put_text(&w, "pinRetries");
-	abk_cbor_put_uint(&w, abk_fido_dev.store.pin_retries);
-	abk_cbor_put_text(&w, "powerCycle");
-	abk_cbor_put_bool(&w, false);
-	abk_cbor_put_text(&w, "forceChangePin");
-	abk_cbor_put_bool(&w, false);
-	abk_cbor_put_text(&w, "residentKey");
-	abk_cbor_put_bool(&w, false);
-	abk_cbor_put_text(&w, "credentialListIndexPlusOne");
-	abk_cbor_put_uint(&w, 0);
-	abk_cbor_put_text(&w, "credentialId");
-	abk_cbor_put_bytes(&w, NULL, 0);
-	abk_cbor_put_text(&w, "hmacSecret");
-	abk_cbor_put_bytes(&w, NULL, 0);
-	abk_cbor_put_text(&w, "credWithHmacSecretArray");
-	abk_cbor_put_bytes(&w, NULL, 0);
-	abk_cbor_put_text(&w, "uvStatus");
-	abk_cbor_put_uint(&w, 0);
-	abk_cbor_put_text(&w, "uvRetries");
-	abk_cbor_put_uint(&w, 0);
-	abk_cbor_put_text(&w, "pinRequiredBeforeSelect");
-	abk_cbor_put_bool(&w, false);
-	abk_cbor_put_text(&w, "ticket");
-	abk_cbor_put_bytes(&w, NULL, 0);
-	abk_cbor_put_text(&w, "credLargeBlobStatus");
-	abk_cbor_put_uint(&w, 0);
-	abk_cbor_put_text(&w, "credLargeBlob");
-	abk_cbor_put_bytes(&w, NULL, 0);
-	abk_cbor_put_text(&w, "maxMsgSize");
-	abk_cbor_put_uint(&w, ABK_FIDO_MAX_MSG);
-	abk_cbor_put_text(&w, "maxSerializedLargeBlobArray");
-	abk_cbor_put_uint(&w, 0);
-	abk_cbor_put_text(&w, "thirdPartyPayment");
-	abk_cbor_put_bool(&w, false);
-	abk_cbor_put_text(&w, "transports");
-	abk_cbor_put_uint(&w, 1);
-	abk_cbor_put_text(&w, "clientDataJSON");
-	abk_cbor_put_bytes(&w, NULL, 0);
-	abk_cbor_put_text(&w, "registrationResponseJSON");
-	abk_cbor_put_bytes(&w, NULL, 0);
-	abk_cbor_put_text(&w, "authenticationResponseJSON");
-	abk_cbor_put_bytes(&w, NULL, 0);
-	abk_cbor_put_text(&w, "status");
-	abk_cbor_put_uint(&w, 0);
-	abk_cbor_put_text(&w, "response");
-	abk_cbor_put_bytes(&w, response_payload, inner_payload_len + 1);
-	if (w.err) {
-		ret = w.err;
-		goto out_unlock;
-	}
-
-	*payload_len = w.pos;
-	pr_info("abk_fido_key: windows selectDevice response len=%zu inner=%zu head=%*phN\n",
-		*payload_len,
-		inner_payload_len + 1,
-		(*payload_len >= 24) ? 24 : (int)*payload_len,
-		payload);
-	ret = 0;
-out_unlock:
-	mutex_unlock(&abk_fido_dev.lock);
-	return ret;
-}
-
-static int abk_fido_make_webauthn_dummy_credential_resp(struct abk_fido_make_cred_req *req,
-						       u8 *payload, size_t *payload_len)
+static int abk_fido_make_selection_credential_resp(struct abk_fido_make_cred_req *req,
+						  u8 *payload, size_t *payload_len)
 {
 	int ret;
 
@@ -2158,11 +1992,12 @@ static int abk_fido_make_webauthn_dummy_credential_resp(struct abk_fido_make_cre
 		goto out_unlock;
 
 	abk_fido_set_last_trace_locked(
-		"dummy makeCredential rp=%s user=%s uv=%u",
+		"selection makeCredential rp=%s user=%s uv=%u",
 		req->rp_id, req->user_name, req->uv);
-	pr_info("abk_fido_key: dummy makeCredential rp=%s user=%s uv=%u\n",
+	pr_info("abk_fido_key: selection makeCredential rp=%s user=%s uv=%u\n",
 		req->rp_id, req->user_name, req->uv);
 
+	/* The ceremony exists to collect exactly this approval. */
 	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_MAKE_CREDENTIAL,
 					 req->rp_id, req->uv, false);
 	if (ret)
@@ -2171,7 +2006,7 @@ static int abk_fido_make_webauthn_dummy_credential_resp(struct abk_fido_make_cre
 	ret = abk_fido_encode_dummy_make_credential_cbor(payload, payload_len);
 	if (ret)
 		goto out_unlock;
-	pr_info("abk_fido_key: dummy makeCredential response len=%zu head=%*phN\n",
+	pr_info("abk_fido_key: selection makeCredential response len=%zu head=%*phN\n",
 		*payload_len,
 		(*payload_len >= 24) ? 24 : (int)*payload_len,
 		payload);
@@ -2403,23 +2238,29 @@ static int abk_fido_parse_make_cred(const u8 *buf, size_t len,
 					req->rk = value;
 				else if (abk_fido_slice_eq_text(text, "uv"))
 					req->uv = value;
+				else if (abk_fido_slice_eq_text(text, "up"))
+					req->up_disabled = !value;
 			}
 			break;
 		}
 		case 8: {
 			struct abk_fido_slice slice;
 
+			/* pinUvAuthParam: recorded, never honoured. This key has
+			 * no client PIN, so the request is refused rather than
+			 * silently claiming user verification.
+			 */
 			if (abk_cbor_read_bytes(&r, &slice))
 				return -EINVAL;
-			req->uv = true;
+			req->pin_auth_present = true;
 			break;
 		}
 		case 9: {
 			u64 protocol;
 
+			/* pinUvAuthProtocol: no PIN, nothing to select. */
 			if (abk_cbor_read_uint(&r, &protocol))
 				return -EINVAL;
-			req->uv = protocol != 0;
 			break;
 		}
 		default:
@@ -2429,14 +2270,15 @@ static int abk_fido_parse_make_cred(const u8 *buf, size_t len,
 		}
 	}
 
-	pr_info("abk_fido_key: parsed makeCredential rp=%s user_name=%s user_display=%s user_id_len=%u exclude=%u rk=%u uv=%u\n",
+	pr_info("abk_fido_key: parsed makeCredential rp=%s user_name=%s user_display=%s user_id_len=%u exclude=%u rk=%u uv=%u pin_auth=%u\n",
 		req->rp_id[0] ? req->rp_id : "<empty>",
 		req->user_name[0] ? req->user_name : "<empty>",
 		req->user_display[0] ? req->user_display : "<empty>",
 		req->user_id_len,
 		req->exclude_count,
 		req->rk,
-		req->uv);
+		req->uv,
+		req->pin_auth_present);
 	return (req->have_client_data_hash && req->have_rp_id && req->have_user_id) ? 0 : -EINVAL;
 }
 
@@ -2522,23 +2364,26 @@ static int abk_fido_parse_get_assert(const u8 *buf, size_t len,
 					return -EINVAL;
 				if (abk_fido_slice_eq_text(text, "uv"))
 					req->uv = value;
+				else if (abk_fido_slice_eq_text(text, "up"))
+					req->up_disabled = !value;
 			}
 			break;
 		}
 		case 6: {
 			struct abk_fido_slice slice;
 
+			/* pinUvAuthParam: see the makeCredential parser. */
 			if (abk_cbor_read_bytes(&r, &slice))
 				return -EINVAL;
-			req->uv = true;
+			req->pin_auth_present = true;
 			break;
 		}
 		case 7: {
 			u64 protocol;
 
+			/* pinUvAuthProtocol: no PIN, nothing to select. */
 			if (abk_cbor_read_uint(&r, &protocol))
 				return -EINVAL;
-			req->uv = protocol != 0;
 			break;
 		}
 		default:
@@ -2549,65 +2394,6 @@ static int abk_fido_parse_get_assert(const u8 *buf, size_t len,
 	}
 
 	return (req->have_client_data_hash && req->have_rp_id) ? 0 : -EINVAL;
-}
-
-static int abk_fido_parse_client_pin(const u8 *buf, size_t len,
-				     struct abk_fido_client_pin_req *req)
-{
-	struct abk_cbor_reader r = { .buf = buf, .len = len };
-	u64 count, i;
-
-	memset(req, 0, sizeof(*req));
-	if (abk_cbor_read_map(&r, &count))
-		return -EINVAL;
-
-	for (i = 0; i < count; i++) {
-		s64 key;
-
-		if (abk_cbor_read_int(&r, &key))
-			return -EINVAL;
-		switch (key) {
-		case 1: {
-			u64 protocol;
-
-			if (abk_cbor_read_uint(&r, &protocol))
-				return -EINVAL;
-			req->protocol = protocol;
-			break;
-		}
-		case 2: {
-			u64 subcmd;
-
-			if (abk_cbor_read_uint(&r, &subcmd))
-				return -EINVAL;
-			req->subcommand = subcmd;
-			break;
-		}
-		case 3:
-			if (abk_fido_decode_cose_key(&r, req->key_agreement.pub_key))
-				return -EINVAL;
-			req->key_agreement.present = true;
-			break;
-		case 4:
-			if (abk_cbor_read_bytes(&r, &req->pin_auth))
-				return -EINVAL;
-			break;
-		case 5:
-			if (abk_cbor_read_bytes(&r, &req->new_pin_enc))
-				return -EINVAL;
-			break;
-		case 6:
-			if (abk_cbor_read_bytes(&r, &req->pin_hash_enc))
-				return -EINVAL;
-			break;
-		default:
-			if (abk_cbor_skip(&r))
-				return -EINVAL;
-			break;
-		}
-	}
-
-	return req->subcommand ? 0 : -EINVAL;
 }
 
 static int abk_fido_find_credential_by_id_locked(const u8 *cred_id, size_t len)
@@ -2627,11 +2413,18 @@ static int abk_fido_find_credential_by_id_locked(const u8 *cred_id, size_t len)
 	return -ENOENT;
 }
 
-static int abk_fido_find_rp_credential_locked(struct abk_fido_get_assert_req *req)
+/* Collect every credential this request could be answered with, in slot order.
+ * Returns the number found; the caller signs the first one and keeps the rest
+ * for authenticatorGetNextAssertion.
+ */
+static unsigned int abk_fido_collect_rp_credentials_locked(struct abk_fido_get_assert_req *req,
+							   u8 *slots,
+							   unsigned int max_slots)
 {
 	unsigned int i;
+	unsigned int count = 0;
 
-	for (i = 0; i < ABK_FIDO_MAX_CREDS; i++) {
+	for (i = 0; i < ABK_FIDO_MAX_CREDS && count < max_slots; i++) {
 		struct abk_fido_credential *cred = &abk_fido_dev.store.creds[i];
 
 		if (!cred->in_use)
@@ -2648,12 +2441,13 @@ static int abk_fido_find_rp_credential_locked(struct abk_fido_get_assert_req *re
 		}
 		pr_info("abk_fido_key: candidate slot=%u selected rp=%s cred=%*phN\n",
 			i, cred->rp_id, 8, cred->cred_id);
-		return i;
+		slots[count++] = i;
 	}
 
-	pr_info("abk_fido_key: no assertion credential matched rp=%s allow_count=%u\n",
-		req->rp_id, req->allow_count);
-	return -ENOENT;
+	if (!count)
+		pr_info("abk_fido_key: no assertion credential matched rp=%s allow_count=%u\n",
+			req->rp_id, req->allow_count);
+	return count;
 }
 
 static int abk_fido_alloc_credential_locked(void)
@@ -2683,33 +2477,45 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 	u64 pub_digits[ECC_MAX_DIGITS * 2] = {};
 	int ret;
 	u8 flags = ABK_FIDO_CRED_FLAG_UP;
-	bool is_windows_select_device = abk_fido_is_windows_select_device_make_credential(req);
-	bool is_webauthn_dummy = abk_fido_is_webauthn_dummy_make_credential(req);
+	bool is_selection = abk_fido_is_selection_make_credential(req);
 
-	pr_info("abk_fido_key: makeCredential dummy_check rp=%s user=%s windows=%u webauthn=%u\n",
+	pr_info("abk_fido_key: makeCredential rp=%s user=%s selection=%u\n",
 		req->rp_id[0] ? req->rp_id : "<empty>",
 		req->user_name[0] ? req->user_name : "<empty>",
-		is_windows_select_device,
-		is_webauthn_dummy);
+		is_selection);
 
-	if (is_windows_select_device)
-		return abk_fido_make_windows_select_device_resp(req, payload,
-								payload_len);
-	if (is_webauthn_dummy)
-		return abk_fido_make_webauthn_dummy_credential_resp(req, payload,
-								    payload_len);
+	if (is_selection)
+		return abk_fido_make_selection_credential_resp(req, payload,
+							      payload_len);
 
 	mutex_lock(&abk_fido_dev.lock);
 	ret = abk_fido_load_store_locked();
 	if (ret && ret != -ENOENT)
 		goto out_unlock;
 	abk_fido_set_last_trace_locked(
-		"makeCredential rp=%s exclude=%u uv=%u rk=%u pin_set=%u pin_retries=%u",
+		"makeCredential rp=%s exclude=%u uv=%u rk=%u pin_auth=%u",
 		req->rp_id, req->exclude_count, req->uv, req->rk,
-		abk_fido_pin_configured_locked(), abk_fido_dev.store.pin_retries);
-	pr_info("abk_fido_key: makeCredential rp=%s exclude=%u uv=%u rk=%u pin_set=%u pin_retries=%u\n",
+		req->pin_auth_present);
+	pr_info("abk_fido_key: makeCredential rp=%s exclude=%u uv=%u rk=%u pin_auth=%u\n",
 		req->rp_id, req->exclude_count, req->uv, req->rk,
-		abk_fido_pin_configured_locked(), abk_fido_dev.store.pin_retries);
+		req->pin_auth_present);
+
+	if (req->pin_auth_present) {
+		/* The client wants PIN based verification; this key only knows
+		 * how to verify the user with the phone's biometric or screen
+		 * lock, so say so instead of pretending a PIN exists.
+		 */
+		ret = ABK_FIDO_ERR_PIN_NOT_SET;
+		goto out_unlock;
+	}
+	if (req->up_disabled) {
+		/* A credential cannot be created without the user in front of
+		 * the phone, and CTAP2 has no meaning for makeCredential with
+		 * up cleared.
+		 */
+		ret = ABK_FIDO_ERR_INVALID_OPTION;
+		goto out_unlock;
+	}
 
 	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_MAKE_CREDENTIAL,
 					 req->rp_id, req->uv, req->rk);
@@ -2759,8 +2565,10 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 
 	abk_fido_p256_pub_to_bytes(pub_digits, cred->pub_key);
 
-	if (req->uv)
-		flags |= ABK_FIDO_CRED_FLAG_UV;
+	/* Nothing reaches this point without a fresh local approval, so the user
+	 * really was verified.
+	 */
+	flags |= ABK_FIDO_CRED_FLAG_UV;
 
 	ret = abk_fido_make_authdata_attested(cred, flags,
 					      abk_fido_dev.store.sign_count,
@@ -2807,66 +2615,63 @@ out_unlock:
 	return ret;
 }
 
-static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_assert_req *req,
-							   u8 *payload, size_t *payload_len)
+static void abk_fido_clear_assert_state_locked(void)
 {
-	struct abk_fido_credential *cred;
+	abk_fido_dev.assert_valid = false;
+	abk_fido_dev.assert_count = 0;
+	abk_fido_dev.assert_next = 0;
+	memzero_explicit(abk_fido_dev.assert_client_data_hash,
+			 sizeof(abk_fido_dev.assert_client_data_hash));
+}
+
+/* Sign one credential and write the getAssertion / getNextAssertion response.
+ * total_credentials > 1 adds the numberOfCredentials field, which is what tells
+ * the client to come back with authenticatorGetNextAssertion.
+ */
+static noinline_for_stack int abk_fido_encode_assertion_locked(unsigned int slot,
+							      const char *rp_id,
+							      const u8 client_data_hash[32],
+							      bool include_user,
+							      unsigned int total_credentials,
+							      u8 *payload,
+							      size_t *payload_len)
+{
+	struct abk_fido_credential *cred = &abk_fido_dev.store.creds[slot];
 	u8 auth_data[64];
 	size_t auth_data_len;
 	u8 sig[ABK_FIDO_MAX_SIG_DER];
 	size_t sig_len;
 	u8 to_sign[128];
 	struct abk_cbor_writer w;
-	int slot;
+	unsigned int pairs = 3;
 	u32 sign_count;
 	int ret;
-	u8 flags = ABK_FIDO_CRED_FLAG_UP;
-	bool include_user;
 
-	mutex_lock(&abk_fido_dev.lock);
-	ret = abk_fido_load_store_locked();
-	if (ret)
-		goto out_unlock;
-	abk_fido_set_last_trace_locked(
-		"getAssertion rp=%s allow=%u uv=%u pin_set=%u pin_retries=%u",
-		req->rp_id, req->allow_count, req->uv,
-		abk_fido_pin_configured_locked(), abk_fido_dev.store.pin_retries);
-	pr_info("abk_fido_key: getAssertion rp=%s allow=%u uv=%u pin_set=%u pin_retries=%u\n",
-		req->rp_id, req->allow_count, req->uv,
-		abk_fido_pin_configured_locked(), abk_fido_dev.store.pin_retries);
+	if (include_user)
+		pairs++;
+	if (total_credentials > 1)
+		pairs++;
 
-	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_GET_ASSERTION,
-					 req->rp_id, req->uv, false);
-	if (ret)
-		goto out_unlock;
-
-	slot = abk_fido_find_rp_credential_locked(req);
-	if (slot < 0) {
-		ret = slot;
-		goto out_unlock;
-	}
-	cred = &abk_fido_dev.store.creds[slot];
 	sign_count = ++abk_fido_dev.store.sign_count;
-	if (req->uv)
-		flags |= ABK_FIDO_CRED_FLAG_UV;
-	include_user = req->allow_count == 0;
-
-	ret = abk_fido_make_authdata_assert(req->rp_id, flags,
-					    sign_count, auth_data, &auth_data_len);
+	/* Nothing reaches this point without a local approval. */
+	ret = abk_fido_make_authdata_assert(rp_id,
+					   ABK_FIDO_CRED_FLAG_UP |
+					   ABK_FIDO_CRED_FLAG_UV,
+					   sign_count, auth_data, &auth_data_len);
 	if (ret)
-		goto out_unlock;
+		return ret;
 
 	memcpy(to_sign, auth_data, auth_data_len);
-	memcpy(to_sign + auth_data_len, req->client_data_hash, 32);
+	memcpy(to_sign + auth_data_len, client_data_hash, 32);
 	ret = abk_fido_sha256(to_sign, auth_data_len + 32, to_sign);
 	if (ret)
-		goto out_unlock;
+		return ret;
 	ret = abk_fido_ecdsa_sign_p256(cred->priv_key, to_sign, sig, &sig_len);
 	if (ret)
-		goto out_unlock;
+		return ret;
 
 	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
-	abk_cbor_put_map(&w, include_user ? 4 : 3);
+	abk_cbor_put_map(&w, pairs);
 	abk_cbor_put_int(&w, 1);
 	abk_cbor_put_map(&w, 2);
 	abk_cbor_put_text(&w, "id");
@@ -2878,22 +2683,183 @@ static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_as
 	abk_cbor_put_int(&w, 3);
 	abk_cbor_put_bytes(&w, sig, sig_len);
 	if (include_user) {
+		bool have_display = cred->user_display[0] &&
+			strcmp(cred->user_display, cred->user_name);
+
 		abk_cbor_put_int(&w, 4);
-		abk_cbor_put_map(&w, 2);
+		abk_cbor_put_map(&w, have_display ? 3 : 2);
 		abk_cbor_put_text(&w, "id");
 		abk_cbor_put_bytes(&w, cred->user_id, cred->user_id_len);
 		abk_cbor_put_text(&w, "name");
 		abk_cbor_put_text(&w, cred->user_name);
+		if (have_display) {
+			/* Account pickers show this one. */
+			abk_cbor_put_text(&w, "displayName");
+			abk_cbor_put_text(&w, cred->user_display);
+		}
 	}
-	if (w.err) {
-		ret = w.err;
-		goto out_unlock;
+	if (total_credentials > 1) {
+		abk_cbor_put_int(&w, 5);
+		abk_cbor_put_uint(&w, total_credentials);
 	}
+	if (w.err)
+		return w.err;
 
 	*payload_len = w.pos;
 	abk_fido_dev.store_dirty = true;
-	ret = abk_fido_maybe_persist_locked();
+	return abk_fido_maybe_persist_locked();
+}
+
+static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_assert_req *req,
+							   u8 *payload, size_t *payload_len)
+{
+	u8 slots[ABK_FIDO_MAX_CREDS];
+	unsigned int count;
+	int ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	abk_fido_clear_assert_state_locked();
+	ret = abk_fido_load_store_locked();
+	if (ret)
+		goto out_unlock;
+	abk_fido_set_last_trace_locked(
+		"getAssertion rp=%s allow=%u uv=%u up=%u pin_auth=%u",
+		req->rp_id, req->allow_count, req->uv, !req->up_disabled,
+		req->pin_auth_present);
+	pr_info("abk_fido_key: getAssertion rp=%s allow=%u uv=%u up=%u pin_auth=%u\n",
+		req->rp_id, req->allow_count, req->uv, !req->up_disabled,
+		req->pin_auth_present);
+
+	if (req->pin_auth_present) {
+		ret = ABK_FIDO_ERR_PIN_NOT_SET;
+		goto out_unlock;
+	}
+	if (req->up_disabled) {
+		/* Silent request. Browsers use these to probe which credentials
+		 * exist, but an assertion is a signature made with a stored
+		 * private key, and this key never produces one without a local
+		 * approval. Refuse before touching the store: no prompt, so a
+		 * host scanning credential ids cannot spam the phone, and no
+		 * cooldown either.
+		 */
+		abk_fido_set_last_trace_locked(
+			"getAssertion silent refused rp=%s allow=%u",
+			req->rp_id, req->allow_count);
+		pr_info("abk_fido_key: getAssertion silent refused rp=%s allow=%u\n",
+			req->rp_id, req->allow_count);
+		ret = ABK_FIDO_ERR_UP_REQUIRED;
+		goto out_unlock;
+	}
+
+	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_GET_ASSERTION,
+					 req->rp_id, req->uv, false);
+	if (ret)
+		goto out_unlock;
+
+	count = abk_fido_collect_rp_credentials_locked(req, slots,
+						      ARRAY_SIZE(slots));
+	if (!count) {
+		ret = -ENOENT;
+		goto out_unlock;
+	}
+
+	/* The user entity is what lets the client tell accounts apart, so send it
+	 * whenever the client did not name a single credential itself.
+	 */
+	ret = abk_fido_encode_assertion_locked(slots[0], req->rp_id,
+					      req->client_data_hash,
+					      req->allow_count == 0 || count > 1,
+					      count, payload, payload_len);
+	if (ret)
+		goto out_unlock;
+
+	if (count > 1) {
+		memcpy(abk_fido_dev.assert_slots, slots, count);
+		memcpy(abk_fido_dev.assert_client_data_hash,
+		       req->client_data_hash,
+		       sizeof(abk_fido_dev.assert_client_data_hash));
+		strscpy(abk_fido_dev.assert_rp_id, req->rp_id,
+			sizeof(abk_fido_dev.assert_rp_id));
+		abk_fido_dev.assert_count = count;
+		abk_fido_dev.assert_next = 1;
+		abk_fido_dev.assert_expires = jiffies +
+			msecs_to_jiffies(ABK_FIDO_ASSERT_WINDOW_MS);
+		abk_fido_dev.assert_valid = true;
+		abk_fido_set_last_trace_locked(
+			"getAssertion rp=%s served 1/%u", req->rp_id, count);
+		pr_info("abk_fido_key: getAssertion rp=%s served 1/%u\n",
+			req->rp_id, count);
+	}
 out_unlock:
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
+static noinline_for_stack int abk_fido_get_next_assertion_resp(u8 *payload,
+							      size_t *payload_len)
+{
+	u8 client_data_hash[32];
+	char rp_id[ABK_FIDO_MAX_RP_ID];
+	unsigned int slot;
+	unsigned int served;
+	int ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	if (!abk_fido_dev.assert_valid ||
+	    abk_fido_dev.assert_next >= abk_fido_dev.assert_count ||
+	    !time_before(jiffies, abk_fido_dev.assert_expires)) {
+		abk_fido_clear_assert_state_locked();
+		abk_fido_set_last_trace_locked("getNextAssertion without state");
+		pr_info("abk_fido_key: getNextAssertion without state\n");
+		ret = ABK_FIDO_ERR_NOT_ALLOWED;
+		goto out_unlock;
+	}
+
+	slot = abk_fido_dev.assert_slots[abk_fido_dev.assert_next];
+	served = abk_fido_dev.assert_next + 1;
+	memcpy(client_data_hash, abk_fido_dev.assert_client_data_hash,
+	       sizeof(client_data_hash));
+	strscpy(rp_id, abk_fido_dev.assert_rp_id, sizeof(rp_id));
+	if (slot >= ABK_FIDO_MAX_CREDS ||
+	    !abk_fido_dev.store.creds[slot].in_use) {
+		abk_fido_clear_assert_state_locked();
+		ret = -ENOENT;
+		goto out_unlock;
+	}
+
+	/* Spec asks for no further user interaction here, and in practice the
+	 * client fetches the remaining assertions immediately, so the grant
+	 * window from the first approval covers them.
+	 */
+	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_GET_NEXT_ASSERTION,
+					 rp_id, false, false);
+	if (ret)
+		goto out_unlock;
+	/* The lock was dropped while waiting, so the continuation may be gone. */
+	if (!abk_fido_dev.assert_valid ||
+	    abk_fido_dev.assert_next + 1 != served) {
+		ret = ABK_FIDO_ERR_NOT_ALLOWED;
+		goto out_unlock;
+	}
+
+	ret = abk_fido_encode_assertion_locked(slot, rp_id, client_data_hash,
+					      true, 1, payload, payload_len);
+	if (ret)
+		goto out_unlock;
+
+	abk_fido_set_last_trace_locked("getNextAssertion rp=%s served %u/%u",
+				       rp_id, served, abk_fido_dev.assert_count);
+	pr_info("abk_fido_key: getNextAssertion rp=%s served %u/%u\n",
+		rp_id, served, abk_fido_dev.assert_count);
+
+	abk_fido_dev.assert_next++;
+	if (abk_fido_dev.assert_next >= abk_fido_dev.assert_count)
+		abk_fido_clear_assert_state_locked();
+	else
+		abk_fido_dev.assert_expires = jiffies +
+			msecs_to_jiffies(ABK_FIDO_ASSERT_WINDOW_MS);
+out_unlock:
+	memzero_explicit(client_data_hash, sizeof(client_data_hash));
 	mutex_unlock(&abk_fido_dev.lock);
 	return ret;
 }
@@ -2911,28 +2877,34 @@ static noinline_for_stack int abk_fido_get_info_resp(u8 *payload, size_t *payloa
 	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
 	abk_cbor_put_map(&w, 6);
 	abk_cbor_put_int(&w, 1);
-	abk_cbor_put_array(&w, 2);
+	/* CTAP2 only. CTAPHID_MSG has no handler and the INIT reply already sets
+	 * CAPABILITY_NMSG, so claiming "U2F_V2" here would only invite a client
+	 * to try a transport that answers with a HID error.
+	 */
+	abk_cbor_put_array(&w, 1);
 	abk_cbor_put_text(&w, "FIDO_2_0");
-	abk_cbor_put_text(&w, "U2F_V2");
 	abk_cbor_put_int(&w, 3);
 	abk_cbor_put_bytes(&w, abk_fido_dev.store.aaguid, sizeof(abk_fido_dev.store.aaguid));
 	abk_cbor_put_int(&w, 4);
-	abk_cbor_put_map(&w, 5);
+	abk_cbor_put_map(&w, 4);
 	abk_cbor_put_text(&w, "rk");
 	abk_cbor_put_bool(&w, true);
 	abk_cbor_put_text(&w, "up");
 	abk_cbor_put_bool(&w, true);
+	/* Built in user verification is always available: the companion app can
+	 * always ask for a fingerprint or the screen lock, and a request is never
+	 * answered without it. "clientPin" is deliberately absent from this map,
+	 * which tells clients the key has no PIN support at all, so they use the
+	 * built in method instead of asking the user to invent a key PIN.
+	 */
 	abk_cbor_put_text(&w, "uv");
-	abk_cbor_put_bool(&w, abk_fido_dev.auth_gate_enabled);
+	abk_cbor_put_bool(&w, true);
 	abk_cbor_put_text(&w, "plat");
 	abk_cbor_put_bool(&w, false);
-	abk_cbor_put_text(&w, "clientPin");
-	abk_cbor_put_bool(&w, abk_fido_pin_configured_locked());
 	abk_cbor_put_int(&w, 5);
 	abk_cbor_put_uint(&w, ABK_FIDO_MAX_MSG);
-	abk_cbor_put_int(&w, 6);
-	abk_cbor_put_array(&w, 1);
-	abk_cbor_put_uint(&w, 1);
+	abk_cbor_put_int(&w, 7);
+	abk_cbor_put_uint(&w, ABK_FIDO_MAX_CRED_LIST_ADVERTISED);
 	abk_cbor_put_int(&w, 8);
 	abk_cbor_put_uint(&w, 32);
 	if (w.err) {
@@ -2941,182 +2913,6 @@ static noinline_for_stack int abk_fido_get_info_resp(u8 *payload, size_t *payloa
 	}
 	*payload_len = w.pos;
 	ret = 0;
-out_unlock:
-	mutex_unlock(&abk_fido_dev.lock);
-	return ret;
-}
-
-static void abk_fido_refresh_pin_agreement_locked(void)
-{
-	u64 priv_digits[ECC_MAX_DIGITS] = {};
-	u64 pub_digits[ECC_MAX_DIGITS * 2] = {};
-
-	memset(abk_fido_dev.pin_agreement_priv, 0, sizeof(abk_fido_dev.pin_agreement_priv));
-	memset(abk_fido_dev.pin_agreement_pub, 0, sizeof(abk_fido_dev.pin_agreement_pub));
-	if (ecc_gen_privkey(ECC_CURVE_NIST_P256, ECC_CURVE_NIST_P256_DIGITS,
-			    priv_digits))
-		return;
-	abk_fido_p256_scalar_to_bytes(priv_digits, abk_fido_dev.pin_agreement_priv);
-	if (ecc_make_pub_key(ECC_CURVE_NIST_P256, ECC_CURVE_NIST_P256_DIGITS,
-			     priv_digits, pub_digits))
-		return;
-	abk_fido_p256_pub_to_bytes(pub_digits, abk_fido_dev.pin_agreement_pub);
-	abk_fido_dev.pin_agreement_valid = true;
-}
-
-static int abk_fido_shared_secret_locked(const u8 peer_pub[64], u8 shared_key[32])
-{
-	u64 priv[ECC_MAX_DIGITS] = {};
-	u64 pub[ECC_MAX_DIGITS * 2] = {};
-	u64 secret[ECC_MAX_DIGITS] = {};
-	int ret;
-
-	if (!abk_fido_dev.pin_agreement_valid)
-		abk_fido_refresh_pin_agreement_locked();
-	if (!abk_fido_dev.pin_agreement_valid)
-		return -EKEYREJECTED;
-
-	abk_fido_p256_scalar_from_bytes(abk_fido_dev.pin_agreement_priv, priv);
-	abk_fido_p256_pub_from_bytes(peer_pub, pub);
-	ret = crypto_ecdh_shared_secret(ECC_CURVE_NIST_P256,
-					ECC_CURVE_NIST_P256_DIGITS,
-					priv, pub, secret);
-	if (ret)
-		return ret;
-
-	return abk_fido_sha256((const u8 *)secret,
-			       ECC_CURVE_NIST_P256_DIGITS * sizeof(u64),
-			       shared_key);
-}
-
-static noinline_for_stack int abk_fido_client_pin_resp(const u8 *buf, size_t len,
-						       u8 *payload, size_t *payload_len)
-{
-	struct abk_fido_client_pin_req req;
-	struct abk_cbor_writer w;
-	u8 shared_key[32];
-	u8 work[80];
-	int ret = 0;
-
-	ret = abk_fido_parse_client_pin(buf, len, &req);
-	if (ret)
-		return -EINVAL;
-	if (req.protocol && req.protocol != 1)
-		return -EINVAL;
-
-	mutex_lock(&abk_fido_dev.lock);
-	ret = abk_fido_load_store_locked();
-	if (ret)
-		goto out_unlock;
-
-	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
-	abk_fido_set_last_trace_locked(
-		"clientPIN subcmd=%u pin_set=%u pin_retries=%u key_agreement=%u",
-		req.subcommand, abk_fido_pin_configured_locked(),
-		abk_fido_dev.store.pin_retries, req.key_agreement.present);
-	pr_info("abk_fido_key: clientPIN subcmd=%u pin_set=%u pin_retries=%u key_agreement=%u\n",
-		req.subcommand, abk_fido_pin_configured_locked(),
-		abk_fido_dev.store.pin_retries, req.key_agreement.present);
-
-	switch (req.subcommand) {
-	case ABK_FIDO_CLIENT_PIN_GET_RETRIES:
-		abk_cbor_put_map(&w, 1);
-		abk_cbor_put_int(&w, 3);
-		abk_cbor_put_uint(&w, abk_fido_dev.store.pin_retries);
-		break;
-	case ABK_FIDO_CLIENT_PIN_GET_KEY_AGREEMENT:
-	{
-		size_t cose_len = 0;
-
-		if (!abk_fido_dev.pin_agreement_valid)
-			abk_fido_refresh_pin_agreement_locked();
-		abk_cbor_put_map(&w, 1);
-		abk_cbor_put_int(&w, 1);
-		ret = abk_fido_encode_cose_key(abk_fido_dev.pin_agreement_pub,
-					       ABK_FIDO_COSE_ALG_ECDH_ES_HKDF_256,
-					       payload + w.pos, &cose_len);
-		if (ret)
-			goto out_unlock;
-		w.pos += cose_len;
-		break;
-	}
-	case ABK_FIDO_CLIENT_PIN_SET_PIN:
-		if (abk_fido_pin_configured_locked()) {
-			ret = -EALREADY;
-			goto out_unlock;
-		}
-		if (!req.key_agreement.present || !req.new_pin_enc.len) {
-			ret = -EINVAL;
-			goto out_unlock;
-		}
-		memset(abk_fido_dev.store.pin_hash, 0, sizeof(abk_fido_dev.store.pin_hash));
-		get_random_bytes(abk_fido_dev.store.pin_token,
-				 sizeof(abk_fido_dev.store.pin_token));
-		abk_fido_dev.store.pin_set = true;
-		abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
-		abk_fido_dev.store_dirty = true;
-		ret = abk_fido_maybe_persist_locked();
-		break;
-	case ABK_FIDO_CLIENT_PIN_GET_PIN_TOKEN:
-		if (!abk_fido_pin_configured_locked()) {
-			ret = -ENOENT;
-			goto out_unlock;
-		}
-		if (!req.key_agreement.present) {
-			ret = -EINVAL;
-			goto out_unlock;
-		}
-		if (!abk_fido_dev.store.pin_retries) {
-			ret = -EACCES;
-			goto out_unlock;
-		}
-		ret = abk_fido_shared_secret_locked(req.key_agreement.pub_key, shared_key);
-		if (ret)
-			goto out_unlock;
-		abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
-		memcpy(work, abk_fido_dev.store.pin_token,
-		       sizeof(abk_fido_dev.store.pin_token));
-		ret = abk_fido_aes256_cbc(true, shared_key, work,
-					  sizeof(abk_fido_dev.store.pin_token));
-		if (ret)
-			goto out_unlock;
-		abk_cbor_put_map(&w, 1);
-		abk_cbor_put_int(&w, 2);
-		abk_cbor_put_bytes(&w, work, sizeof(abk_fido_dev.store.pin_token));
-		break;
-	case ABK_FIDO_CLIENT_PIN_CHANGE_PIN:
-		if (!abk_fido_pin_configured_locked()) {
-			ret = -ENOENT;
-			goto out_unlock;
-		}
-		if (!req.key_agreement.present || !req.new_pin_enc.len) {
-			ret = -EINVAL;
-			goto out_unlock;
-		}
-		get_random_bytes(abk_fido_dev.store.pin_token,
-				 sizeof(abk_fido_dev.store.pin_token));
-		abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
-		abk_fido_dev.store_dirty = true;
-		ret = abk_fido_maybe_persist_locked();
-		break;
-	default:
-		ret = -EOPNOTSUPP;
-		break;
-	}
-
-	if (w.err && !ret)
-		ret = w.err;
-	if (ret) {
-		abk_fido_set_last_trace_locked(
-			"clientPIN failed subcmd=%u ret=%d pin_set=%u pin_retries=%u",
-			req.subcommand, ret, abk_fido_pin_configured_locked(),
-			abk_fido_dev.store.pin_retries);
-		pr_warn("abk_fido_key: clientPIN failed subcmd=%u ret=%d pin_set=%u pin_retries=%u\n",
-			req.subcommand, ret, abk_fido_pin_configured_locked(),
-			abk_fido_dev.store.pin_retries);
-	}
-	if (!ret)
-		*payload_len = w.pos;
 out_unlock:
 	mutex_unlock(&abk_fido_dev.lock);
 	return ret;
@@ -3132,6 +2928,13 @@ static noinline_for_stack int abk_fido_cbor_dispatch(const u8 *msg, size_t len,
 		return -EINVAL;
 
 	cmd = msg[0];
+	if (cmd != ABK_FIDO_CTAP_GET_NEXT_ASSERTION &&
+	    cmd != ABK_FIDO_CTAP_GET_ASSERTION) {
+		/* Any other command ends a pending assertion continuation. */
+		mutex_lock(&abk_fido_dev.lock);
+		abk_fido_clear_assert_state_locked();
+		mutex_unlock(&abk_fido_dev.lock);
+	}
 	switch (cmd) {
 	case ABK_FIDO_CTAP_GET_INFO:
 		return abk_fido_get_info_resp(payload, payload_len);
@@ -3160,8 +2963,19 @@ static noinline_for_stack int abk_fido_cbor_dispatch(const u8 *msg, size_t len,
 		kfree(req);
 		return ret ? ret : 0;
 	}
+	case ABK_FIDO_CTAP_GET_NEXT_ASSERTION:
+		return abk_fido_get_next_assertion_resp(payload, payload_len);
 	case ABK_FIDO_CTAP_RESET:
 		mutex_lock(&abk_fido_dev.lock);
+		/* Wiping every credential is the most destructive thing a host can
+		 * ask for, so it needs the same local approval as using a key.
+		 */
+		ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_RESET, "", false,
+						 false);
+		if (ret) {
+			mutex_unlock(&abk_fido_dev.lock);
+			return ret;
+		}
 		memset(&abk_fido_dev.store, 0, sizeof(abk_fido_dev.store));
 		abk_fido_dev.store.pin_retries = ABK_FIDO_PIN_RETRIES_DEFAULT;
 		get_random_bytes(abk_fido_dev.store.aaguid,
@@ -3173,10 +2987,23 @@ static noinline_for_stack int abk_fido_cbor_dispatch(const u8 *msg, size_t len,
 		mutex_unlock(&abk_fido_dev.lock);
 		return ret;
 	case ABK_FIDO_CTAP_SELECTION:
+		/* CTAP2.1 authenticatorSelection is the same ceremony as the
+		 * legacy dummy makeCredential: it exists only to collect the
+		 * user's approval on this device.
+		 */
+		mutex_lock(&abk_fido_dev.lock);
+		ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_SELECTION, "",
+						 false, false);
+		mutex_unlock(&abk_fido_dev.lock);
+		if (ret)
+			return ret;
 		*payload_len = 0;
 		return 0;
 	case ABK_FIDO_CTAP_CLIENT_PIN:
-		return abk_fido_client_pin_resp(msg + 1, len - 1, payload, payload_len);
+		/* No client PIN by design: user verification is the phone's
+		 * biometric or screen lock, never a PIN kept in this key.
+		 */
+		return ABK_FIDO_ERR_INVALID_COMMAND;
 	default:
 		return -ENOIOCTLCMD;
 	}
@@ -3354,13 +3181,25 @@ static void abk_fido_dispatch_msg(struct abk_fido_usb *usb, u32 cid, u8 cmd,
 			abk_fido_send_cbor_result(usb, cid,
 						  ABK_FIDO_CTAP_ERR_OPERATION_DENIED,
 						  NULL, 0);
-		else if (ret == -EACCES)
+		else if (ret == ABK_FIDO_ERR_INVALID_COMMAND)
 			abk_fido_send_cbor_result(usb, cid,
-						  ABK_FIDO_CTAP_ERR_PIN_BLOCKED,
+						  ABK_FIDO_CTAP_ERR_INVALID_COMMAND,
 						  NULL, 0);
-		else if (ret == -EKEYREJECTED)
+		else if (ret == ABK_FIDO_ERR_PIN_NOT_SET)
 			abk_fido_send_cbor_result(usb, cid,
-						  ABK_FIDO_CTAP_ERR_PIN_AUTH_INVALID,
+						  ABK_FIDO_CTAP_ERR_PIN_NOT_SET,
+						  NULL, 0);
+		else if (ret == ABK_FIDO_ERR_INVALID_OPTION)
+			abk_fido_send_cbor_result(usb, cid,
+						  ABK_FIDO_CTAP_ERR_INVALID_OPTION,
+						  NULL, 0);
+		else if (ret == ABK_FIDO_ERR_UP_REQUIRED)
+			abk_fido_send_cbor_result(usb, cid,
+						  ABK_FIDO_CTAP_ERR_UP_REQUIRED,
+						  NULL, 0);
+		else if (ret == ABK_FIDO_ERR_NOT_ALLOWED)
+			abk_fido_send_cbor_result(usb, cid,
+						  ABK_FIDO_CTAP_ERR_NOT_ALLOWED,
 						  NULL, 0);
 		else
 			abk_fido_send_cbor_result(usb, cid,
@@ -4087,35 +3926,45 @@ static ssize_t restore_metadata_store(struct kobject *kobj,
 	return ret ? ret : count;
 }
 
+/* Kept for the companion app, which checks that the gate is on. Local approval
+ * is mandatory now, so this always reads 1 and refuses to be turned off.
+ */
 static ssize_t auth_gate_enabled_show(struct kobject *kobj,
 				      struct kobj_attribute *attr, char *buf)
 {
-	ssize_t ret;
-
-	mutex_lock(&abk_fido_dev.lock);
-	ret = sysfs_emit(buf, "%u\n", abk_fido_dev.auth_gate_enabled);
-	mutex_unlock(&abk_fido_dev.lock);
-	return ret;
+	return sysfs_emit(buf, "1\n");
 }
 
 static ssize_t auth_gate_enabled_store(struct kobject *kobj,
 				       struct kobj_attribute *attr,
 				       const char *buf, size_t count)
 {
-	bool enabled;
-
 	if (sysfs_streq(buf, "1") || sysfs_streq(buf, "true") || sysfs_streq(buf, "on"))
-		enabled = true;
-	else if (sysfs_streq(buf, "0") || sysfs_streq(buf, "false") || sysfs_streq(buf, "off"))
-		enabled = false;
-	else
-		return -EINVAL;
+		return count;
+	if (sysfs_streq(buf, "0") || sysfs_streq(buf, "false") || sysfs_streq(buf, "off"))
+		return -EPERM;
+	return -EINVAL;
+}
+
+static ssize_t auth_cooldown_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	unsigned int grant_ms = 0, deny_ms = 0;
+	unsigned long now;
+	ssize_t ret;
 
 	mutex_lock(&abk_fido_dev.lock);
-	abk_fido_dev.auth_gate_enabled = enabled;
-	abk_fido_set_last_trace_locked("auth gate %s", enabled ? "enabled" : "disabled");
+	now = jiffies;
+	if (abk_fido_dev.auth_cache_valid &&
+	    time_before(now, abk_fido_dev.auth_cache_expires))
+		grant_ms = jiffies_to_msecs(abk_fido_dev.auth_cache_expires - now);
+	if (abk_fido_dev.auth_deny_valid &&
+	    time_before(now, abk_fido_dev.auth_deny_expires))
+		deny_ms = jiffies_to_msecs(abk_fido_dev.auth_deny_expires - now);
+	ret = sysfs_emit(buf, "grant_ms=%u deny_ms=%u window_ms=%u\n",
+			 grant_ms, deny_ms, ABK_FIDO_AUTH_CACHE_MS);
 	mutex_unlock(&abk_fido_dev.lock);
-	return count;
+	return ret;
 }
 
 static ssize_t auth_pending_show(struct kobject *kobj,
@@ -4202,6 +4051,7 @@ static struct kobj_attribute store_generation_attr = __ATTR_RO(store_generation)
 static struct kobj_attribute reload_store_attr = __ATTR_WO(reload_store);
 static struct kobj_attribute restore_metadata_attr = __ATTR_WO(restore_metadata);
 static struct kobj_attribute auth_gate_enabled_attr = __ATTR_RW(auth_gate_enabled);
+static struct kobj_attribute auth_cooldown_attr = __ATTR_RO(auth_cooldown);
 static struct kobj_attribute auth_pending_attr = __ATTR_RO(auth_pending);
 static struct kobj_attribute auth_request_id_attr = __ATTR_RO(auth_request_id);
 static struct kobj_attribute auth_context_attr = __ATTR_RO(auth_context);
@@ -4229,6 +4079,7 @@ static struct attribute *abk_fido_attrs[] = {
 	&reload_store_attr.attr,
 	&restore_metadata_attr.attr,
 	&auth_gate_enabled_attr.attr,
+	&auth_cooldown_attr.attr,
 	&auth_pending_attr.attr,
 	&auth_request_id_attr.attr,
 	&auth_context_attr.attr,
@@ -4274,11 +4125,10 @@ static int abk_fido_control_run_command(const char *command, void *data)
 	} else if (!strcmp(command, "auth_deny")) {
 		ret = abk_fido_auth_decide_locked(false, 0, false);
 	} else if (!strcmp(command, "auth_gate_on")) {
-		abk_fido_dev.auth_gate_enabled = true;
+		/* Always on; kept so older callers keep working. */
 		ret = 0;
 	} else if (!strcmp(command, "auth_gate_off")) {
-		abk_fido_dev.auth_gate_enabled = false;
-		ret = 0;
+		ret = -EPERM;
 	} else if (!strcmp(command, "pin_reset")) {
 		memset(abk_fido_dev.store.pin_hash, 0, sizeof(abk_fido_dev.store.pin_hash));
 		abk_fido_dev.store.pin_set = false;
@@ -4379,7 +4229,6 @@ static int __init abk_fido_core_init(void)
 	if (!abk_fido_dev.kobj)
 		return -ENOMEM;
 	init_waitqueue_head(&abk_fido_dev.auth_wait);
-	abk_fido_dev.auth_gate_enabled = true;
 
 	ret = sysfs_create_group(abk_fido_dev.kobj, &abk_fido_attr_group);
 	if (ret) {

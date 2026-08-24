@@ -18,7 +18,7 @@ class PairingCodeActivity : AppCompatActivity() {
 
         val code = RootShell.readTextFile("/metadata/abk_fido_pairing_code").stdout.trim()
         val codeView = TextView(this).apply {
-            text = code.ifBlank { "Unavailable" }
+            text = code.ifBlank { getString(R.string.pairing_code_none) }
             textSize = 32f
             typeface = Typeface.MONOSPACE
             setTypeface(typeface, Typeface.BOLD)
@@ -29,7 +29,7 @@ class PairingCodeActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 4, 24, 8)
             addView(TextView(this@PairingCodeActivity).apply {
-                text = "Enter this code in the desktop agent to pair this phone."
+                text = getString(R.string.pairing_dialog_message)
                 textSize = 15f
                 setPadding(0, 0, 0, 20)
             })
@@ -37,13 +37,15 @@ class PairingCodeActivity : AppCompatActivity() {
         }
 
         MaterialAlertDialogBuilder(this)
-            .setTitle("Pair ABK FIDO")
+            .setTitle(R.string.pairing_dialog_title)
             .setView(content)
-            .setNegativeButton("Close") { _, _ -> finish() }
-            .setPositiveButton("Copy code") { _, _ ->
+            .setNegativeButton(R.string.action_close) { _, _ -> finish() }
+            .setPositiveButton(R.string.action_copy) { _, _ ->
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("ABK FIDO pairing code", code))
-                Toast.makeText(this, "Pairing code copied", Toast.LENGTH_SHORT).show()
+                clipboard.setPrimaryClip(
+                    ClipData.newPlainText(getString(R.string.pairing_code_title), code)
+                )
+                Toast.makeText(this, R.string.pairing_code_copied, Toast.LENGTH_SHORT).show()
             }
             .setOnDismissListener { finish() }
             .show()

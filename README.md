@@ -130,8 +130,34 @@ assembled.
   FIDO HID device; the LAN session uses pairing-code-derived AES-GCM frames.
   Windows reaches the same interface through `\\.\ABKFidoVhid`, the control
   device of the `windows/vhid` driver.
-- Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`, `clientPIN`
-  (minimal), `reset`, and `selection`.
+- Implements CTAP2 `getInfo`, `makeCredential`, `getAssertion`,
+  `getNextAssertion`, `reset`, and `selection`. There is deliberately no
+  `clientPIN`: `getInfo` always reports
+  `uv: true` and never lists a `clientPin` option, so clients use the phone's
+  biometric or screen lock through the companion app instead of asking the user
+  to set a separate security-key PIN. `clientPIN` requests are answered with
+  `CTAP1_ERR_INVALID_COMMAND`, and a request carrying `pinUvAuthParam` gets
+  `CTAP2_ERR_PIN_NOT_SET`.
+- Several credentials for one relying party are handled: `getAssertion` reports
+  `numberOfCredentials` and the client walks the rest with
+  `authenticatorGetNextAssertion` (30 s window, invalidated by any other
+  command), each assertion carrying the account's `name` and `displayName`.
+- `authenticatorReset` wipes every credential, so it needs the same local
+  approval as using a key.
+- Local approval is mandatory: nothing that touches a credential is answered
+  before the companion app's biometric / screen-lock prompt has been approved,
+  and there is no switch that turns that off (`auth_gate_enabled` always reads
+  `1` and refuses a `0`). One approval covers further requests for 3 s; a
+  refused, cancelled or unanswered prompt instead blocks every request for 3 s.
+  `/sys/kernel/abk_fido_key/auth_cooldown` reports both windows.
+- Silent requests are refused. A `getAssertion` with the `up` option cleared —
+  what browsers use to probe which credential ids exist — would hand out a
+  signature with no one in front of the phone, so it gets
+  `CTAP2_ERR_UP_REQUIRED` without a prompt and without arming the cooldown.
+  `makeCredential` with `up` cleared gets `CTAP2_ERR_INVALID_OPTION`. Exclusion
+  is therefore handled the direct way: up to 32 `excludeList` / `allowList`
+  entries are parsed per request (`maxCredentialCountInList` advertises 16 to
+  stay inside `maxMsgSize`), and a match answers `CTAP2_ERR_CREDENTIAL_EXCLUDED`.
 - Persists the kernel-side FIDO store blob at `/metadata/abk_fido_store.bin`.
 - During build injection, the module patches KernelSU SELinux policy setup so
   the `kernel` domain can access that metadata blob without switching SELinux
@@ -155,8 +181,9 @@ closing the app changes nothing about how the key behaves.
 策略与生物识别弹窗，关闭界面不会影响钥匙的行为。
 
 - **Use FIDO keys** is the master switch. The driver's own `enabled` node is
-  read-only, so the switch is enforced in userspace instead: `auth_gate_enabled`
-  stays `1` and the service denies every request while the switch is off.
+  read-only and local approval can no longer be disabled, so the switch is
+  enforced in userspace: the service denies every request while it is off, and
+  each denial also starts the driver's 3 s cooldown.
 - **FIDO over Wi‑Fi** starts and stops the LAN relay described below.
 - **Pairing code** shows the code from `/metadata/abk_fido_pairing_code` and
   copies it to the clipboard.
@@ -187,7 +214,7 @@ After a successful build and boot, check:
 - `/sys/kernel/abk_fido_key/hid_dev` reports a `hidgX` device name
 - `/sys/kernel/abk_fido_key/bound` becomes `1` after the gadget is bound
 - `/dev/hidgX` exists for packet-level debugging
-- after a credential or PIN change, `/metadata/abk_fido_store.bin` exists
+- after a credential change, `/metadata/abk_fido_store.bin` exists
 - writing `1` to `/sys/kernel/abk_fido_key/restore_metadata` increments
   `store_generation` and restores the expected `credential_count`
 - `/sys/kernel/abk_fido_key/last_error` is empty after a successful restore
@@ -219,7 +246,13 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 
 ## Current Limits / 当前边界
 
-- Unsupport Windows Hello
+- Windows Hello is untested. The device selection ceremony is handled — Windows
+  sends a makeCredential with `rp.id` = `user.name` = `"SelectDevice"` (built in
+  `_SelectDevice`, `webauthnctap.cpp`) and the driver answers it like Chromium's
+  `.dummy` request: collect the local approval, return a throwaway
+  makeCredential response, create nothing. What is *not* verified is the rest of
+  the Windows path, including how it reacts to a key that advertises `uv` with
+  no `clientPin` and refuses silent `getAssertion`.
 - The LAN relay needs a virtual HID device on the desktop, and creating one is
   privileged on both platforms: on Linux the agent uses `/dev/uhid` and must run
   as root; on Windows it needs the `abkfidovhid` driver from

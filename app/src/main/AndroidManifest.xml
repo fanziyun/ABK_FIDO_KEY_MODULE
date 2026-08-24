@@ -10,6 +10,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature
         android:name="android.hardware.usb.host"
@@ -18,7 +19,26 @@
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AbkFido">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.AbkFido">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".LanClientsActivity"
+            android:exported="false"
+            android:label="@string/lan_title"
+            android:parentActivityName=".MainActivity"
+            android:theme="@style/Theme.AbkFido" />
 
         <activity
             android:name=".FidoDiagnosticsActivity"
@@ -52,7 +72,7 @@
                 android:value=".FidoBootstrapActivity" />
             <meta-data
                 android:name="com.abk.kernel.extension.SETTINGS_ACTIVITY"
-                android:value=".FidoBootstrapActivity" />
+                android:value=".MainActivity" />
             <meta-data
                 android:name="com.abk.kernel.extension.SERVICE_ACTIVITY"
                 android:value=".FidoSyncService" />

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/menu_client_authorize"
+        android:title="@string/lan_menu_authorize" />
+    <item
+        android:id="@+id/menu_client_revoke"
+        android:title="@string/lan_menu_revoke" />
+    <item
+        android:id="@+id/menu_client_block"
+        android:title="@string/lan_menu_block" />
+    <item
+        android:id="@+id/menu_client_forget"
+        android:title="@string/lan_menu_forget" />
+</menu>

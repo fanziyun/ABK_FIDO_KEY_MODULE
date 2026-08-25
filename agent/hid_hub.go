@@ -114,6 +114,25 @@ func logHostFrame(packet []byte) {
 		binary.BigEndian.Uint16(packet[5:7]))
 }
 
+// logDeviceFrame is the same line for the other direction, so a transaction
+// that never gets an answer is distinguishable from one whose answer the host
+// stack dropped. A CBOR reply also carries its status byte, which is what tells
+// a refusal apart from a transport failure.
+func logDeviceFrame(packet []byte) {
+	command := packet[4]
+	if command&0x80 == 0 {
+		return
+	}
+	length := binary.BigEndian.Uint16(packet[5:7])
+	if command == 0x90 && length > 0 {
+		log.Printf("device frame cid=%08x cmd=0x%02x len=%d status=0x%02x",
+			binary.BigEndian.Uint32(packet[:4]), command, length, packet[7])
+		return
+	}
+	log.Printf("device frame cid=%08x cmd=0x%02x len=%d",
+		binary.BigEndian.Uint32(packet[:4]), command, length)
+}
+
 func (h *hidHub) write(s *hidSubscription, packet []byte) error {
 	if len(packet) != 64 {
 		return errors.New("invalid HID packet")

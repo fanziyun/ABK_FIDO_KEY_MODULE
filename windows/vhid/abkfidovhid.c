@@ -373,6 +373,7 @@ AbkEvtIoWrite(
     PVOID               buffer;
     size_t              bufferLength;
     PUCHAR              data;
+    UCHAR               report[1 + ABK_REPORT_SIZE];
     NTSTATUS            status;
 
     if (Length < ABK_REPORT_SIZE) {
@@ -393,13 +394,36 @@ AbkEvtIoWrite(
         data++;
     }
 
+    //
+    // HID_XFER_PACKET carries the report id as the first byte of the buffer,
+    // and that holds for an unnumbered descriptor too: the host-to-device
+    // reports arriving in AbkEvtVhfWriteReport are 65 bytes led by a zero. Send
+    // the same shape back. Submitting the bare 64-byte frame makes HIDClass
+    // read our first byte - 0xff for the broadcast channel - as a report id it
+    // has never heard of, and the answer is dropped; a host then sees nothing
+    // but its own CTAPHID_INIT timing out, over and over.
+    //
+    report[0] = 0;
+    RtlCopyMemory(report + 1, data, ABK_REPORT_SIZE);
+
     packet.reportId = 0;
-    packet.reportBuffer = data;
-    packet.reportBufferLen = ABK_REPORT_SIZE;
+    packet.reportBuffer = report;
+    packet.reportBufferLen = sizeof(report);
 
     WdfSpinLockAcquire(context->Lock);
     if (context->VhfStarted) {
         status = VhfReadReportSubmit(context->VhfHandle, &packet);
+        if (status == STATUS_INVALID_BUFFER_SIZE ||
+            status == STATUS_INVALID_PARAMETER) {
+            // Fall back to the bare frame in case this VHF build wants the
+            // report without its id, so a wrong guess here costs a retry
+            // rather than every reply.
+            KdPrint(("abkfidovhid: 65-byte submit refused 0x%x, retrying with 64\n",
+                     status));
+            packet.reportBuffer = data;
+            packet.reportBufferLen = ABK_REPORT_SIZE;
+            status = VhfReadReportSubmit(context->VhfHandle, &packet);
+        }
     } else {
         status = STATUS_DEVICE_NOT_READY;
     }

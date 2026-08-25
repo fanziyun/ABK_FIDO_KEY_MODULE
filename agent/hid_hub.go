@@ -109,9 +109,17 @@ func logHostFrame(packet []byte) {
 	if command&0x80 == 0 {
 		return
 	}
+	length := binary.BigEndian.Uint16(packet[5:7])
+	if command == 0x86 && length >= 8 {
+		// A host that keeps re-initializing is either not getting an answer or
+		// not recognizing the one it gets, and the nonce is what tells those
+		// apart.
+		log.Printf("host frame cid=%08x cmd=0x%02x len=%d nonce=%x",
+			binary.BigEndian.Uint32(packet[:4]), command, length, packet[7:15])
+		return
+	}
 	log.Printf("host frame cid=%08x cmd=0x%02x len=%d",
-		binary.BigEndian.Uint32(packet[:4]), command,
-		binary.BigEndian.Uint16(packet[5:7]))
+		binary.BigEndian.Uint32(packet[:4]), command, length)
 }
 
 // logDeviceFrame is the same line for the other direction, so a transaction
@@ -124,13 +132,18 @@ func logDeviceFrame(packet []byte) {
 		return
 	}
 	length := binary.BigEndian.Uint16(packet[5:7])
-	if command == 0x90 && length > 0 {
+	switch {
+	case command == 0x86 && length >= 17:
+		log.Printf("device frame cid=%08x cmd=0x%02x len=%d nonce=%x channel=%08x caps=0x%02x",
+			binary.BigEndian.Uint32(packet[:4]), command, length, packet[7:15],
+			binary.BigEndian.Uint32(packet[15:19]), packet[23])
+	case command == 0x90 && length > 0:
 		log.Printf("device frame cid=%08x cmd=0x%02x len=%d status=0x%02x",
 			binary.BigEndian.Uint32(packet[:4]), command, length, packet[7])
-		return
+	default:
+		log.Printf("device frame cid=%08x cmd=0x%02x len=%d",
+			binary.BigEndian.Uint32(packet[:4]), command, length)
 	}
-	log.Printf("device frame cid=%08x cmd=0x%02x len=%d",
-		binary.BigEndian.Uint32(packet[:4]), command, length)
 }
 
 func (h *hidHub) write(s *hidSubscription, packet []byte) error {

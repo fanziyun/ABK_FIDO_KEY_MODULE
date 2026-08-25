@@ -63,6 +63,13 @@ typedef struct _ABK_DEVICE_CONTEXT {
 
     WDFSPINLOCK Lock;
 
+    // Whether HIDClass leads a report buffer with its report id. The two
+    // directions use the same convention, so the length of the host's output
+    // reports is what decides how input reports have to be submitted; guessing
+    // wrong sends every reply one byte out of place. Guarded by Lock.
+    BOOLEAN     ReportIdSeen;
+    BOOLEAN     ReportIdLeads;
+
     // Host->device backlog, guarded by Lock.
     ULONG       Head;
     ULONG       Tail;

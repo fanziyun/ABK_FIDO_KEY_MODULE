@@ -401,16 +401,27 @@ AbkEvtIoWrite(
 
     //
     // HID_XFER_PACKET carries the report id as the first byte of the buffer,
-    // and whether HIDClass applies that to an unnumbered descriptor is a
-    // question this driver does not have to guess about: the host's output
-    // reports arrive in AbkEvtVhfWriteReport in exactly the same shape, so
-    // whatever was seen there is what gets sent back. Submitting the wrong
-    // shape puts every reply one byte out of place - HIDClass reads our first
-    // byte, 0xff for the broadcast channel, as a report id it has never heard
-    // of - and the host sees nothing but its own CTAPHID_INIT timing out.
+    // and whether HIDClass applies that to an unnumbered descriptor is only
+    // half answered by the traffic coming the other way: the host's output
+    // reports arrive in AbkEvtVhfWriteReport in some shape, and the reply is
+    // sent back in the same one unless ABK_IOCTL_SET_REPORT_MODE says
+    // otherwise. Submitting the wrong shape puts every reply one byte out of
+    // place - HIDClass reads our first byte, 0xff for the broadcast channel, as
+    // a report id it has never heard of - and the host sees nothing but its own
+    // CTAPHID_INIT timing out.
     //
     WdfSpinLockAcquire(context->Lock);
-    reportIdLeads = context->ReportIdSeen ? context->ReportIdLeads : TRUE;
+    switch (context->ReportMode) {
+    case ABK_REPORT_MODE_PLAIN:
+        reportIdLeads = FALSE;
+        break;
+    case ABK_REPORT_MODE_LEADING_ID:
+        reportIdLeads = TRUE;
+        break;
+    default:
+        reportIdLeads = context->ReportIdSeen ? context->ReportIdLeads : TRUE;
+        break;
+    }
     WdfSpinLockRelease(context->Lock);
 
     if (reportIdLeads) {
@@ -540,7 +551,33 @@ AbkEvtIoDeviceControl(
     size_t              bufferLength;
     NTSTATUS            status;
 
-    UNREFERENCED_PARAMETER(InputBufferLength);
+    if (IoControlCode == ABK_IOCTL_SET_REPORT_MODE) {
+        ULONG mode;
+
+        if (InputBufferLength < sizeof(ULONG)) {
+            WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL);
+            return;
+        }
+        status = WdfRequestRetrieveInputBuffer(Request, sizeof(ULONG), &buffer, &bufferLength);
+        if (!NT_SUCCESS(status)) {
+            WdfRequestComplete(Request, status);
+            return;
+        }
+        mode = *(PULONG)buffer;
+        if (mode > (ULONG)ABK_REPORT_MODE_LEADING_ID) {
+            WdfRequestComplete(Request, STATUS_INVALID_PARAMETER);
+            return;
+        }
+
+        WdfSpinLockAcquire(context->Lock);
+        context->ReportMode = mode;
+        context->Stats.ReportMode = mode;
+        WdfSpinLockRelease(context->Lock);
+
+        KdPrint(("abkfidovhid: report mode set to %u\n", mode));
+        WdfRequestComplete(Request, STATUS_SUCCESS);
+        return;
+    }
 
     if (IoControlCode != ABK_IOCTL_GET_STATS) {
         WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
@@ -562,6 +599,7 @@ AbkEvtIoDeviceControl(
     context->Stats.Size = sizeof(ABK_STATS);
     context->Stats.Dropped = context->Dropped;
     context->Stats.ReplyBacklog = context->ReplyCount;
+    context->Stats.ReportMode = context->ReportMode;
     RtlCopyMemory(buffer, &context->Stats, sizeof(ABK_STATS));
     WdfSpinLockRelease(context->Lock);
 

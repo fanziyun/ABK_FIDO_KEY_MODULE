@@ -64,10 +64,26 @@ typedef struct _ABK_STATS {
     ULONG GetInputServed;      // ... and got a queued reply
     ULONG ReplyBacklog;
     ULONG Dropped;
+    ULONG ReportMode;          // ABK_REPORT_MODE_*, the shape submits use
 } ABK_STATS, *PABK_STATS;
 
 #define ABK_IOCTL_GET_STATS \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_DATA)
+
+//
+// Which shape input reports are submitted in. The two directions need not use
+// the same convention, so what the host's output reports look like is a guess
+// about the reply, not a fact - and a wrong guess is indistinguishable from a
+// host that ignores the device. Settable from user mode with
+// ABK_IOCTL_SET_REPORT_MODE (a ULONG in the input buffer) so both shapes can be
+// tried in one boot instead of one driver build each.
+//
+#define ABK_REPORT_MODE_AUTO       0   // follow the host's output reports
+#define ABK_REPORT_MODE_PLAIN      1   // 64 bytes, no report id
+#define ABK_REPORT_MODE_LEADING_ID 2   // report id byte first, then 64 bytes
+
+#define ABK_IOCTL_SET_REPORT_MODE \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_WRITE_DATA)
 
 // Depth of the device->host replies kept for a host that polls with
 // IOCTL_HID_GET_INPUT_REPORT instead of reading the input pipe.
@@ -95,6 +111,9 @@ typedef struct _ABK_DEVICE_CONTEXT {
     // wrong sends every reply one byte out of place. Guarded by Lock.
     BOOLEAN     ReportIdSeen;
     BOOLEAN     ReportIdLeads;
+
+    // ABK_REPORT_MODE_*, guarded by Lock. Overrides the calibration above.
+    ULONG       ReportMode;
 
     // Host->device backlog, guarded by Lock.
     ULONG       Head;

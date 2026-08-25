@@ -154,7 +154,9 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {
 		if len(p) != 64 {
 			return errors.New("invalid CTAP packet")
 		}
+		logDeviceFrame(p)
 		if e = hub.write(subscription, p); e != nil {
+			log.Printf("submitting the reply to the local HID stack failed: %v", e)
 			return e
 		}
 	}

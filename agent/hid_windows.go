@@ -106,6 +106,7 @@ type abkStats struct {
 	GetInputServed    uint32
 	ReplyBacklog      uint32
 	Dropped           uint32
+	ReportMode        uint32
 }
 
 // Stats asks the driver what the HID stack has actually done. A host that never
@@ -126,8 +127,9 @@ func (h *windowsHID) Stats() (string, error) {
 		return "", fmt.Errorf("short stats buffer (%d bytes)", got)
 	}
 	return fmt.Sprintf("vhid stats: host_reports=%d last_host_len=%d submitted=%d "+
-		"submit_failures=%d last_submit=0x%08x/%d get_input=%d served=%d backlog=%d dropped=%d",
+		"submit_failures=%d last_submit=0x%08x/%d get_input=%d served=%d backlog=%d dropped=%d "+
+		"report_mode=%d",
 		s.HostReports, s.LastHostReportLen, s.Submitted, s.SubmitFailures,
 		s.LastSubmitStatus, s.LastSubmitLen, s.GetInputReports, s.GetInputServed,
-		s.ReplyBacklog, s.Dropped), nil
+		s.ReplyBacklog, s.Dropped, s.ReportMode), nil
 }

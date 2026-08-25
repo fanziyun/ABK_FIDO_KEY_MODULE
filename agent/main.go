@@ -122,6 +122,21 @@ func overrideInitCaps(packet []byte) {
 	packet[23] = byte(initCaps)
 }
 
+// logHIDStats reports what the local HID stack did with the replies handed to
+// it, on the backends that keep count.
+func logHIDStats(hub *hidHub) {
+	reporter, ok := hub.hid.(hidStats)
+	if !ok {
+		return
+	}
+	line, err := reporter.Stats()
+	if err != nil {
+		log.Printf("reading HID stack counters failed: %v", err)
+		return
+	}
+	log.Print(line)
+}
+
 func relay(conn net.Conn, pairing string, hub *hidHub) error {	s, err := newSession(conn, pairing)
 	if err != nil {
 		return err
@@ -135,6 +150,7 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {	s, err := newSess
 	}
 	subscription := hub.subscribe()
 	defer hub.unsubscribe(subscription)
+	logHIDStats(hub)
 	writeErrors := make(chan error, 1)
 	go func() {
 		for {
@@ -156,6 +172,7 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {	s, err := newSess
 			}
 		}
 	}()
+	lastStats := time.Now()
 	for {
 		select {
 		case err := <-writeErrors:
@@ -174,6 +191,10 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {	s, err := newSess
 		if e = hub.write(subscription, p); e != nil {
 			log.Printf("submitting the reply to the local HID stack failed: %v", e)
 			return e
+		}
+		if time.Since(lastStats) > 3*time.Second {
+			lastStats = time.Now()
+			logHIDStats(hub)
 		}
 	}
 }

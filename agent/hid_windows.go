@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"syscall"
+	"unsafe"
 )
 
 // syscall does not name this one, and the agent has no third-party dependencies
@@ -88,3 +89,45 @@ func (h *windowsHID) Write(p []byte) error {
 	return e
 }
 func (h *windowsHID) Close() error { return h.f.Close() }
+
+// abkIoctlGetStats is CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED,
+// FILE_READ_DATA), matching ABK_IOCTL_GET_STATS in windows/vhid.
+const abkIoctlGetStats = (0x22 << 16) | (1 << 14) | (0x800 << 2)
+
+type abkStats struct {
+	Size              uint32
+	HostReports       uint32
+	LastHostReportLen uint32
+	Submitted         uint32
+	SubmitFailures    uint32
+	LastSubmitStatus  uint32
+	LastSubmitLen     uint32
+	GetInputReports   uint32
+	GetInputServed    uint32
+	ReplyBacklog      uint32
+	Dropped           uint32
+}
+
+// Stats asks the driver what the HID stack has actually done. A host that never
+// reads our replies looks identical from up here to one that reads and rejects
+// them; these counters are the difference.
+func (h *windowsHID) Stats() (string, error) {
+	var (
+		s   abkStats
+		got uint32
+	)
+	buf := (*byte)(unsafe.Pointer(&s))
+	err := syscall.DeviceIoControl(syscall.Handle(h.f.Fd()), abkIoctlGetStats,
+		nil, 0, buf, uint32(unsafe.Sizeof(s)), &got, nil)
+	if err != nil {
+		return "", err
+	}
+	if got < uint32(unsafe.Sizeof(s)) {
+		return "", fmt.Errorf("short stats buffer (%d bytes)", got)
+	}
+	return fmt.Sprintf("vhid stats: host_reports=%d last_host_len=%d submitted=%d "+
+		"submit_failures=%d last_submit=0x%08x/%d get_input=%d served=%d backlog=%d dropped=%d",
+		s.HostReports, s.LastHostReportLen, s.Submitted, s.SubmitFailures,
+		s.LastSubmitStatus, s.LastSubmitLen, s.GetInputReports, s.GetInputServed,
+		s.ReplyBacklog, s.Dropped), nil
+}

@@ -191,6 +191,7 @@ AbkQueuesCreate(
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
     queueConfig.EvtIoRead = AbkEvtIoRead;
     queueConfig.EvtIoWrite = AbkEvtIoWrite;
+    queueConfig.EvtIoDeviceControl = AbkEvtIoDeviceControl;
     queueConfig.PowerManaged = WdfFalse;
 
     status = WdfIoQueueCreate(Context->Device,
@@ -241,14 +242,17 @@ AbkVhfInitialize(
     config.VersionNumber = ABK_VERSION;
 
     //
-    // Output reports are the only host-initiated traffic CTAP HID uses: no
-    // feature reports, no get-input-report. Leaving the other callbacks NULL
-    // makes VHF fail those requests, which is the correct answer for this
-    // report descriptor. EvtVhfReadyForNextReadReport is deliberately absent
-    // too - without it VHF buffers submitted reports, so AbkEvtIoWrite may
-    // hand it a stack buffer and return.
+    // Output reports are the traffic CTAP HID is built around, but a host is
+    // free to fetch a response with IOCTL_HID_GET_INPUT_REPORT instead of
+    // reading the input pipe, and leaving that callback NULL makes VHF fail
+    // those requests - which looks to the host like a key that never answers.
+    // Feature reports have no meaning for this descriptor and stay unhandled.
+    // EvtVhfReadyForNextReadReport is deliberately absent too - without it VHF
+    // buffers submitted reports, so AbkEvtIoWrite may hand it a stack buffer
+    // and return.
     //
     config.EvtVhfAsyncOperationWriteReport = AbkEvtVhfWriteReport;
+    config.EvtVhfAsyncOperationGetInputReport = AbkEvtVhfGetInputReport;
 
     status = VhfCreate(&config, &Context->VhfHandle);
     if (!NT_SUCCESS(status)) {
@@ -443,6 +447,25 @@ AbkEvtIoWrite(
     } else {
         status = STATUS_DEVICE_NOT_READY;
     }
+
+    context->Stats.LastSubmitStatus = (ULONG)status;
+    context->Stats.LastSubmitLen = packet.reportBufferLen;
+    if (NT_SUCCESS(status)) {
+        context->Stats.Submitted++;
+        // Keep the frame for a host that polls with GET_INPUT_REPORT rather
+        // than reading the input pipe. Oldest goes first: a reply the host
+        // never collected belongs to a transaction it has given up on.
+        if (context->ReplyCount == ABK_REPLY_SLOTS) {
+            context->ReplyTail = (context->ReplyTail + 1) % ABK_REPLY_SLOTS;
+            context->ReplyCount--;
+        }
+        RtlCopyMemory(context->Replies[context->ReplyHead], data, ABK_REPORT_SIZE);
+        context->ReplyHead = (context->ReplyHead + 1) % ABK_REPLY_SLOTS;
+        context->ReplyCount++;
+        context->Stats.ReplyBacklog = context->ReplyCount;
+    } else {
+        context->Stats.SubmitFailures++;
+    }
     WdfSpinLockRelease(context->Lock);
 
     WdfRequestCompleteWithInformation(Request, status, NT_SUCCESS(status) ? Length : 0);
@@ -481,6 +504,8 @@ AbkEvtVhfWriteReport(
     WdfSpinLockAcquire(context->Lock);
     context->ReportIdLeads = (length > ABK_REPORT_SIZE) ? TRUE : FALSE;
     context->ReportIdSeen = TRUE;
+    context->Stats.HostReports++;
+    context->Stats.LastHostReportLen = length;
     WdfSpinLockRelease(context->Lock);
 
     if (length > ABK_REPORT_SIZE && data[0] == 0) {
@@ -497,6 +522,110 @@ AbkEvtVhfWriteReport(
     RtlCopyMemory(frame, data, length);
 
     AbkDeliverHostReport(context, frame);
+
+    VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
+}
+
+VOID
+AbkEvtIoDeviceControl(
+    _In_ WDFQUEUE   Queue,
+    _In_ WDFREQUEST Request,
+    _In_ size_t     OutputBufferLength,
+    _In_ size_t     InputBufferLength,
+    _In_ ULONG      IoControlCode
+    )
+{
+    PABK_DEVICE_CONTEXT context = AbkGetDeviceContext(WdfIoQueueGetDevice(Queue));
+    PVOID               buffer;
+    size_t              bufferLength;
+    NTSTATUS            status;
+
+    UNREFERENCED_PARAMETER(InputBufferLength);
+
+    if (IoControlCode != ABK_IOCTL_GET_STATS) {
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
+        return;
+    }
+    if (OutputBufferLength < sizeof(ABK_STATS)) {
+        WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL);
+        return;
+    }
+
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(ABK_STATS), &buffer,
+                                            &bufferLength);
+    if (!NT_SUCCESS(status)) {
+        WdfRequestComplete(Request, status);
+        return;
+    }
+
+    WdfSpinLockAcquire(context->Lock);
+    context->Stats.Size = sizeof(ABK_STATS);
+    context->Stats.Dropped = context->Dropped;
+    context->Stats.ReplyBacklog = context->ReplyCount;
+    RtlCopyMemory(buffer, &context->Stats, sizeof(ABK_STATS));
+    WdfSpinLockRelease(context->Lock);
+
+    WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(ABK_STATS));
+}
+
+//
+// A host that fetches responses with IOCTL_HID_GET_INPUT_REPORT instead of
+// reading the input pipe ends up here. Hand it the oldest reply that has not
+// been collected yet; with nothing queued there is nothing to report, and
+// STATUS_NO_MORE_ENTRIES tells the host to come back rather than that the
+// device is broken.
+//
+VOID
+AbkEvtVhfGetInputReport(
+    _In_     PVOID              VhfClientContext,
+    _In_     VHFOPERATIONHANDLE VhfOperationHandle,
+    _In_opt_ PVOID              VhfOperationContext,
+    _In_     PHID_XFER_PACKET   HidTransferPacket
+    )
+{
+    PABK_DEVICE_CONTEXT context = (PABK_DEVICE_CONTEXT)VhfClientContext;
+    UCHAR               frame[ABK_REPORT_SIZE];
+    PUCHAR              out;
+    ULONG               capacity;
+    BOOLEAN             haveFrame = FALSE;
+
+    UNREFERENCED_PARAMETER(VhfOperationContext);
+
+    out = HidTransferPacket->reportBuffer;
+    capacity = HidTransferPacket->reportBufferLen;
+    if (out == NULL || capacity == 0) {
+        VhfAsyncOperationComplete(VhfOperationHandle, STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    WdfSpinLockAcquire(context->Lock);
+    context->Stats.GetInputReports++;
+    if (context->ReplyCount > 0) {
+        RtlCopyMemory(frame, context->Replies[context->ReplyTail], ABK_REPORT_SIZE);
+        context->ReplyTail = (context->ReplyTail + 1) % ABK_REPLY_SLOTS;
+        context->ReplyCount--;
+        context->Stats.GetInputServed++;
+        context->Stats.ReplyBacklog = context->ReplyCount;
+        haveFrame = TRUE;
+    }
+    WdfSpinLockRelease(context->Lock);
+
+    if (!haveFrame) {
+        VhfAsyncOperationComplete(VhfOperationHandle, STATUS_NO_MORE_ENTRIES);
+        return;
+    }
+
+    // Mirror whatever shape the caller asked for: a 65-byte buffer wants the
+    // zero report id first, a 64-byte one just the frame.
+    if (capacity > ABK_REPORT_SIZE) {
+        out[0] = 0;
+        RtlCopyMemory(out + 1, frame, ABK_REPORT_SIZE);
+        HidTransferPacket->reportBufferLen = 1 + ABK_REPORT_SIZE;
+    } else {
+        RtlCopyMemory(out, frame, ABK_REPORT_SIZE);
+        HidTransferPacket->reportBufferLen = ABK_REPORT_SIZE;
+    }
+    HidTransferPacket->reportId = 0;
 
     VhfAsyncOperationComplete(VhfOperationHandle, STATUS_SUCCESS);
 }

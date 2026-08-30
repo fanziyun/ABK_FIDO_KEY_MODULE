@@ -370,6 +370,13 @@ driver that gives the LAN relay something for browsers to find:
   removes the root-enumerated devnode the driver binds to (`abkvhidctl install
   <inf>` / `remove` / `status`). `pnputil` cannot invent a devnode for hardware
   that does not exist, which is what a software-only HID source needs.
+  `abkvhidctl loopback` additionally plays both host and key — it writes an
+  output report into the HID interface Windows published and answers it through
+  `\\.\ABKFidoVhid` — so whether a CTAP frame survives each direction of the
+  driver is answered without the phone, the relay or `webauthn.dll` taking part.
+  It needs the agent stopped, since both want the same exclusive handle, and it
+  tries the reply with and without a leading report id byte, leaving the driver
+  set to whichever shape came back.
 - `windows/scripts/` — `Sign-Package.ps1` (packages and test-signs with a
   freshly generated self-signed certificate), plus
   `Install-AbkFidoVhid.ps1` / `Uninstall-AbkFidoVhid.ps1`.

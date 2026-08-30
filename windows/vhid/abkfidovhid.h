@@ -47,6 +47,48 @@ Environment:
 #define ABK_PRODUCT_ID 0x1D02
 #define ABK_VERSION    0x0100
 
+//
+// Counters the agent can read back, because a host stack that ignores this
+// device says nothing about why. Fetched with ABK_IOCTL_GET_STATS on the same
+// handle the agent already holds, since the control device is exclusive.
+//
+typedef struct _ABK_STATS {
+    ULONG Size;
+    ULONG HostReports;         // output reports VHF handed us
+    ULONG LastHostReportLen;   // 65 when HIDClass leads with a report id
+    ULONG Submitted;           // input reports accepted by VHF
+    ULONG SubmitFailures;
+    ULONG LastSubmitStatus;
+    ULONG LastSubmitLen;
+    ULONG GetInputReports;     // times the host polled for an input report
+    ULONG GetInputServed;      // ... and got a queued reply
+    ULONG ReplyBacklog;
+    ULONG Dropped;
+    ULONG ReportMode;          // ABK_REPORT_MODE_*, the shape submits use
+} ABK_STATS, *PABK_STATS;
+
+#define ABK_IOCTL_GET_STATS \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_DATA)
+
+//
+// Which shape input reports are submitted in. The two directions need not use
+// the same convention, so what the host's output reports look like is a guess
+// about the reply, not a fact - and a wrong guess is indistinguishable from a
+// host that ignores the device. Settable from user mode with
+// ABK_IOCTL_SET_REPORT_MODE (a ULONG in the input buffer) so both shapes can be
+// tried in one boot instead of one driver build each.
+//
+#define ABK_REPORT_MODE_AUTO       0   // follow the host's output reports
+#define ABK_REPORT_MODE_PLAIN      1   // 64 bytes, no report id
+#define ABK_REPORT_MODE_LEADING_ID 2   // report id byte first, then 64 bytes
+
+#define ABK_IOCTL_SET_REPORT_MODE \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_WRITE_DATA)
+
+// Depth of the device->host replies kept for a host that polls with
+// IOCTL_HID_GET_INPUT_REPORT instead of reading the input pipe.
+#define ABK_REPLY_SLOTS 8
+
 typedef struct _ABK_DEVICE_CONTEXT {
     WDFDEVICE   Device;
 
@@ -63,12 +105,31 @@ typedef struct _ABK_DEVICE_CONTEXT {
 
     WDFSPINLOCK Lock;
 
+    // Whether HIDClass leads a report buffer with its report id. The two
+    // directions use the same convention, so the length of the host's output
+    // reports is what decides how input reports have to be submitted; guessing
+    // wrong sends every reply one byte out of place. Guarded by Lock.
+    BOOLEAN     ReportIdSeen;
+    BOOLEAN     ReportIdLeads;
+
+    // ABK_REPORT_MODE_*, guarded by Lock. Overrides the calibration above.
+    ULONG       ReportMode;
+
     // Host->device backlog, guarded by Lock.
     ULONG       Head;
     ULONG       Tail;
     ULONG       Count;
     ULONG       Dropped;
     UCHAR       Ring[ABK_RING_SLOTS][ABK_REPORT_SIZE];
+
+    // Device->host replies already submitted to VHF, kept so a host that polls
+    // with IOCTL_HID_GET_INPUT_REPORT can still be served. Guarded by Lock.
+    ULONG       ReplyHead;
+    ULONG       ReplyTail;
+    ULONG       ReplyCount;
+    UCHAR       Replies[ABK_REPLY_SLOTS][ABK_REPORT_SIZE];
+
+    ABK_STATS   Stats;
 } ABK_DEVICE_CONTEXT, *PABK_DEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(ABK_DEVICE_CONTEXT, AbkGetDeviceContext)
@@ -79,4 +140,6 @@ EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT     AbkEvtDeviceSelfManagedIoInit;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_CLEANUP  AbkEvtDeviceSelfManagedIoCleanup;
 EVT_WDF_IO_QUEUE_IO_READ                AbkEvtIoRead;
 EVT_WDF_IO_QUEUE_IO_WRITE               AbkEvtIoWrite;
+EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL      AbkEvtIoDeviceControl;
 EVT_VHF_ASYNC_OPERATION                 AbkEvtVhfWriteReport;
+EVT_VHF_ASYNC_OPERATION                 AbkEvtVhfGetInputReport;

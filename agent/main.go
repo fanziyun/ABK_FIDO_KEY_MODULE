@@ -106,8 +106,38 @@ func (s *session) write(p []byte) error {
 	return err
 }
 
-func relay(conn net.Conn, pairing string, hub *hidHub) error {
-	s, err := newSession(conn, pairing)
+// initCaps overrides the capabilities byte of CTAPHID_INIT replies. It exists
+// because a host stack that refuses a key states no reason: the phone would
+// have to be reflashed to try a different byte, while this makes it one restart
+// of the agent. -1 leaves the phone's own answer alone.
+var initCaps = -1
+
+func overrideInitCaps(packet []byte) {
+	if initCaps < 0 || len(packet) < 24 {
+		return
+	}
+	if packet[4] != 0x86 || binary.BigEndian.Uint16(packet[5:7]) < 17 {
+		return
+	}
+	packet[23] = byte(initCaps)
+}
+
+// logHIDStats reports what the local HID stack did with the replies handed to
+// it, on the backends that keep count.
+func logHIDStats(hub *hidHub) {
+	reporter, ok := hub.hid.(hidStats)
+	if !ok {
+		return
+	}
+	line, err := reporter.Stats()
+	if err != nil {
+		log.Printf("reading HID stack counters failed: %v", err)
+		return
+	}
+	log.Print(line)
+}
+
+func relay(conn net.Conn, pairing string, hub *hidHub) error {	s, err := newSession(conn, pairing)
 	if err != nil {
 		return err
 	}
@@ -120,6 +150,7 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {
 	}
 	subscription := hub.subscribe()
 	defer hub.unsubscribe(subscription)
+	logHIDStats(hub)
 	writeErrors := make(chan error, 1)
 	go func() {
 		for {
@@ -141,6 +172,7 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {
 			}
 		}
 	}()
+	lastStats := time.Now()
 	for {
 		select {
 		case err := <-writeErrors:
@@ -154,8 +186,15 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {
 		if len(p) != 64 {
 			return errors.New("invalid CTAP packet")
 		}
+		overrideInitCaps(p)
+		logDeviceFrame(p)
 		if e = hub.write(subscription, p); e != nil {
+			log.Printf("submitting the reply to the local HID stack failed: %v", e)
 			return e
+		}
+		if time.Since(lastStats) > 3*time.Second {
+			lastStats = time.Now()
+			logHIDStats(hub)
 		}
 	}
 }
@@ -163,7 +202,9 @@ func relay(conn net.Conn, pairing string, hub *hidHub) error {
 func main() {
 	pairing := flag.String("pairing", "", "pairing code / PSK (required)")
 	phone := flag.String("phone", "", "phone LAN address, e.g. 192.168.1.20:38741 (auto-discovered when omitted)")
+	caps := flag.Int("init-caps", -1, "diagnostic: replace the capabilities byte of CTAPHID_INIT replies, e.g. 5 to claim CTAPHID_MSG support")
 	flag.Parse()
+	initCaps = *caps
 	// Check the virtual-key backend before anything interactive: it needs root
 	// on Linux, and on Windows it needs the abkfidovhid driver installed and an
 	// elevated prompt. Either way the user should learn that before the phone

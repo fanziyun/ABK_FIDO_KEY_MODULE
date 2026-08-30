@@ -3,7 +3,7 @@
   <!--
     Deliberately plain: no WDK and no NuGet, and the toolset follows whatever
     Visual Studio the machine has rather than a pinned version. The tool only
-    needs setupapi/newdev/cfgmgr32, all of which ship in the Windows SDK.
+    needs setupapi/newdev/cfgmgr32/hid, all of which ship in the Windows SDK.
   -->
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -49,7 +49,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>setupapi.lib;newdev.lib;cfgmgr32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>setupapi.lib;newdev.lib;cfgmgr32.lib;hid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

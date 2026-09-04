@@ -594,6 +594,9 @@ static void abk_fido_set_last_trace_locked(const char *fmt, ...);
 static int abk_fido_store_from_disk_into(struct abk_fido_store_disk *disk,
 					 struct abk_fido_store *store,
 					 char *reason, size_t reason_len);
+static int abk_fido_store_from_disk_v1_into(struct abk_fido_store_disk_v1 *disk,
+					    struct abk_fido_store *store,
+					    char *reason, size_t reason_len);
 static void abk_fido_store_to_disk(struct abk_fido_store_disk *disk);
 static void abk_fido_finalize_restored_store_locked(const char *success_trace);
 static int abk_fido_load_store_locked(void);
@@ -773,6 +776,8 @@ static int abk_fido_aes256_cbc(const u8 key[32], const u8 iv[16],
 			       u8 *inout, size_t in_len, bool encrypt)
 {
 	struct crypto_skcipher *tfm;
+	struct skcipher_request *req;
+	struct crypto_wait wait;
 	struct scatterlist sg;
 	int ret;
 
@@ -785,31 +790,40 @@ static int abk_fido_aes256_cbc(const u8 key[32], const u8 iv[16],
 				    PTR_ERR(tfm));
 		return PTR_ERR(tfm);
 	}
-	{
-		SYNC_SKCIPHER_REQUEST_ON_STACK(req, tfm);
-		struct crypto_wait wait;
 
-		crypto_init_wait(&wait);
-		ret = crypto_skcipher_setkey(tfm, key, 32);
-		if (!ret) {
-			sg_init_one(&sg, inout, in_len);
-			skcipher_request_set_tfm(req, tfm);
-			skcipher_request_set_callback(req,
-						      CRYPTO_TFM_REQ_MAY_BACKLOG,
-						      crypto_req_done, &wait);
-			skcipher_request_set_crypt(req, &sg, &sg, in_len, iv);
-
-			if (encrypt)
-				ret = crypto_skcipher_encrypt(req);
-			else
-				ret = crypto_skcipher_decrypt(req);
-			/* Wait out any async completion; with MAY_BACKLOG the
-			 * request is otherwise dropped as a confusing error.
-			 */
-			ret = crypto_wait_req(ret, &wait);
-		}
-		skcipher_request_zero(req);
+	/* 5.15's SYNC_SKCIPHER_REQUEST_ON_STACK only accepts
+	 * crypto_sync_skcipher pointers, so cbc(aes) gets a heap request on
+	 * every supported kernel line.
+	 */
+	req = skcipher_request_alloc(tfm, GFP_KERNEL);
+	if (!req) {
+		crypto_free_skcipher(tfm);
+		return -ENOMEM;
 	}
+
+	crypto_init_wait(&wait);
+	ret = crypto_skcipher_setkey(tfm, key, 32);
+	if (!ret) {
+		sg_init_one(&sg, inout, in_len);
+		skcipher_request_set_tfm(req, tfm);
+		skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+					      crypto_req_done, &wait);
+		/* 5.15 declares the iv parameter as void * (6.1 made it
+		 * const), so the cast keeps both lines compiling.
+		 */
+		skcipher_request_set_crypt(req, &sg, &sg, in_len, (void *)iv);
+
+		if (encrypt)
+			ret = crypto_skcipher_encrypt(req);
+		else
+			ret = crypto_skcipher_decrypt(req);
+		/* Wait out any async completion; with MAY_BACKLOG the request
+		 * is otherwise dropped as a confusing error.
+		 */
+		ret = crypto_wait_req(ret, &wait);
+	}
+	skcipher_request_zero(req);
+	skcipher_request_free(req);
 	crypto_free_skcipher(tfm);
 	return ret;
 }

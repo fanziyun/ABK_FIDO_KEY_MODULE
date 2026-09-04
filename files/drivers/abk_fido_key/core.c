@@ -44,10 +44,8 @@
 #include <crypto/kpp.h>
 #include <crypto/skcipher.h>
 #include <crypto/aes.h>
-/*
- * The internal ECC header moved in v5.16: 5.15 keeps it at crypto/ecc.h, which
- * is not under include/, so it is only reachable by relative path. 5.16 and
- * later expose it as <crypto/internal/ecc.h>.
+/* 5.15 keeps the ECC header at crypto/ecc.h; 5.16+ moved it to
+ * crypto/internal/ecc.h.
  */
 #if defined(__has_include)
 #  if __has_include(<crypto/internal/ecc.h>)
@@ -71,26 +69,16 @@
 #define ABK_FIDO_MAX_USER_ID			64
 #define ABK_FIDO_MAX_USER_NAME			64
 #define ABK_FIDO_MAX_CREDS			32
-/* excludeList / allowList entries kept per request. Matching the store size
- * means a client can name every credential the key holds, so the exclusion
- * check never silently ignores an entry.
- */
+/* excludeList / allowList capacity: matches the store size. */
 #define ABK_FIDO_MAX_CRED_LIST			ABK_FIDO_MAX_CREDS
-/* What clients are told to batch. 32 ids of 32 bytes plus the rest of a
- * makeCredential request would crowd ABK_FIDO_MAX_MSG, so advertise half the
- * parser's capacity and stay well inside the transport budget.
- */
+/* Advertised capacity: half the parser's, to stay inside the message budget. */
 #define ABK_FIDO_MAX_CRED_LIST_ADVERTISED	(ABK_FIDO_MAX_CRED_LIST / 2)
 #define ABK_FIDO_MAX_CBOR			1536
 #define ABK_FIDO_MAX_SIG_DER			80
-/* A successful local approval is reusable for this long, and a failed one blocks
- * everything for the same span.
- */
+/* An approval is reusable for this long; a failure blocks for the same span. */
 #define ABK_FIDO_AUTH_CACHE_MS			3000
 #define ABK_FIDO_AUTH_DENY_MS			3000
-/* How long a multi-credential getAssertion stays continuable through
- * authenticatorGetNextAssertion, per CTAP2.
- */
+/* getAssertion continuation window (authenticatorGetNextAssertion). */
 #define ABK_FIDO_ASSERT_WINDOW_MS		30000
 #define ABK_FIDO_STORE_PATH			"/metadata/abk_fido_store.bin"
 #define ABK_FIDO_STORE_MAGIC			0x41424646
@@ -98,9 +86,7 @@
 /* Version 1 on-disk blobs are still readable and are upgraded in place. */
 #define ABK_FIDO_STORE_VERSION_LEGACY		1
 #define ABK_FIDO_PIN_RETRIES_DEFAULT		8
-/* hmac-secret extension (CTAP2 6.6, classic form): 32-byte per-credential
- * secret, 32-byte salts and outputs.
- */
+/* hmac-secret (CTAP2 6.6 classic): 32-byte secrets, salts and outputs. */
 #define ABK_FIDO_HMAC_SECRET_LEN		32
 #define ABK_FIDO_HMAC_SALT_LEN			32
 #define ABK_FIDO_HMAC_SALT_AUTH_LEN		16
@@ -150,16 +136,11 @@
 #define ABK_FIDO_CTAP_ERR_UNSUPPORTED_OPTION	0x2b
 #define ABK_FIDO_CTAP_ERR_INVALID_OPTION	0x2c
 #define ABK_FIDO_CTAP_ERR_NO_CREDENTIALS	0x2e
-/* This key has no client PIN: user verification is the phone's own biometric
- * or screen lock, so a PIN based pinUvAuthParam is always rejected.
- */
+/* No client PIN by design: the phone's biometric or screen lock verifies. */
 #define ABK_FIDO_CTAP_ERR_PIN_NOT_SET		0x35
 #define ABK_FIDO_CTAP_ERR_UP_REQUIRED		0x39
 
-/* The response helpers can only hand an errno back to the CBOR dispatcher, so
- * the few CTAP specific outcomes travel as these aliases. Keeping them in one
- * place is the only way the mapping stays readable.
- */
+/* CTAP specific outcomes travel as these errno aliases. */
 #define ABK_FIDO_ERR_INVALID_COMMAND		(-ENOSYS)
 #define ABK_FIDO_ERR_PIN_NOT_SET		(-ENOKEY)
 #define ABK_FIDO_ERR_INVALID_OPTION		(-EBADRQC)
@@ -779,9 +760,7 @@ static int abk_fido_hmac_sha256(const u8 *key, size_t key_len,
 	return ret;
 }
 
-/* The classic hmac-secret extension seals both directions with AES-256-CBC
- * under an all-zero 16-byte IV, exactly like fido2's PinProtocolV1.
- */
+/* Classic hmac-secret: AES-256-CBC with an all-zero 16-byte IV, both ways. */
 static const u8 abk_fido_hmac_zero_iv[16];
 
 /* In-place AES-256-CBC. in_len must be a multiple of the block size. */
@@ -875,10 +854,8 @@ static int abk_fido_kpp_run_sync(struct crypto_kpp *tfm, bool compute_shared,
 	return ret;
 }
 
-/* ECDH over P-256: shared = SHA-256(x-coordinate), the derivation the
- * classic hmac-secret extension (and PIN/UV protocol v1) uses. peer_xy is
- * the raw platform point x || y (64 bytes). The private key wire format is
- * crypto_ecdh_encode_key(): kpp_secret + u16 key_size + key.
+/* ECDH over P-256 (classic hmac-secret): shared = SHA-256(x). peer_xy is the
+ * raw platform point x || y; the private key uses crypto_ecdh_encode_key().
  */
 static int abk_fido_ecdh_p256(const u8 priv[32], const u8 peer_xy[64],
 			      u8 shared[SHA256_DIGEST_SIZE])
@@ -2257,15 +2234,10 @@ static void abk_fido_auth_start_cooldown_locked(void)
 		msecs_to_jiffies(ABK_FIDO_AUTH_DENY_MS);
 }
 
-/* Keepalive pacer. Windows webauthn's HID read gives up after ~2 s of
- * silence, so while the auth decision is pending on the phone the driver
- * sends a CTAPHID_KEEPALIVE (0x3b, wire 0xbb) frame carrying a one-byte
- * PROCESSING status every 500 ms - exactly what hardware security keys
- * do while waiting for a touch. This must be a raw HID frame, NOT a
- * CBOR result: a CTAPHID_CBOR frame with a status byte is parsed by the
- * host as the final response to the pending command, which makes Windows
- * abort the transaction ("unable to get your security key") while the
- * fingerprint prompt is still up on the phone.
+/* Keepalive pacer. Windows webauthn gives up after ~2 s of silence, so send
+ * a CTAPHID_KEEPALIVE (0xbb, PROCESSING) frame every 500 ms while the
+ * approval is pending. A raw HID frame, not a CBOR result: a CBOR frame
+ * would be read as the command's final response.
  */
 static void abk_fido_auth_keepalive_worker(struct work_struct *work)
 {
@@ -3980,10 +3952,7 @@ static void abk_fido_dispatch_msg(struct abk_fido_usb *usb, u32 cid, u8 cmd,
 		abk_fido_dev.auth_cid = cid;
 		mutex_unlock(&abk_fido_dev.lock);
 		ret = abk_fido_cbor_dispatch(data, len, payload, &payload_len);
-		/* No more keepalives for this transaction: clear the transport
-		 * first (so a racing worker sends nothing) and drain a worker
-		 * that is already mid-send before the response goes out.
-		 */
+		/* Stop the keepalives for this transaction before the response goes out. */
 		mutex_lock(&abk_fido_dev.lock);
 		abk_fido_dev.auth_usb = NULL;
 		mutex_unlock(&abk_fido_dev.lock);
@@ -4072,11 +4041,8 @@ static void abk_fido_process_packet(struct abk_fido_usb *usb, const u8 *packet, 
 	if (len != ABK_FIDO_REPORT_LEN)
 		return;
 
-	/* If a previous IN transfer never completed (a host can stop polling
-	 * once its own request timed out), tx_pending stays set forever and
-	 * every later response queues up behind the dead transfer. A fresh
-	 * command means the host is listening again: dequeue the stuck
-	 * request so the reply to THIS command can go out.
+	/* A host that times out stops polling the IN endpoint: dequeue the stuck
+	 * transfer so the reply to this command can go out.
 	 */
 	spin_lock_irqsave(&usb->tx_lock, flags);
 	if (usb->tx_pending && usb->in_ep && usb->in_req) {
@@ -4742,8 +4708,7 @@ static ssize_t hid_state_show(struct kobject *kobj,
 }
 
 /* Fixed P-256 keypair, salts and expected outputs for the hmac-secret
- * crypto self-test, generated by tests/gen_hmac_vectors.py and pinned in
- * tests/hmac_vectors.json.
+ * crypto self-test.
  */
 static const u8 abk_fido_selftest_cred_priv[32] = {
 	0xda, 0x3f, 0x6e, 0xc6, 0xbd, 0x4a, 0x0e, 0x13, 0xee, 0x23, 0x23, 0x96,
@@ -4806,10 +4771,7 @@ static ssize_t hmac_selftest_show(struct kobject *kobj,
 	ssize_t out_len;
 	int ret = 0;
 
-	/* The parsed request shape carries a 32-entry allowlist (~1.5 kB):
-	 * heap-allocate it instead of blowing the sysfs attribute's stack
-	 * frame past the compiler's 2 kB warning limit.
-	 */
+	/* Heap-allocate the ~1.5 kB request shape to stay inside the frame limit. */
 	req = kvzalloc(sizeof(*req), GFP_KERNEL);
 	if (!req)
 		return -ENOMEM;

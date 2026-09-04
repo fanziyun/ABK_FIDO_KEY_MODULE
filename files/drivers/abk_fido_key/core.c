@@ -3996,15 +3996,35 @@ static void abk_fido_dispatch_msg(struct abk_fido_usb *usb, u32 cid, u8 cmd,
 static void abk_fido_process_packet(struct abk_fido_usb *usb, const u8 *packet, size_t len)
 {
 	struct abk_fido_channel *ch;
+	unsigned long flags;
 	u32 cid;
 	u8 header;
 	size_t chunk;
 	u8 *msg = NULL;
 	size_t msg_len = 0;
 	u8 cmd = 0;
+	int ret;
 
 	if (len != ABK_FIDO_REPORT_LEN)
 		return;
+
+	/* If a previous IN transfer never completed (a host can stop polling
+	 * once its own request timed out), tx_pending stays set forever and
+	 * every later response queues up behind the dead transfer. A fresh
+	 * command means the host is listening again: dequeue the stuck
+	 * request so the reply to THIS command can go out.
+	 */
+	spin_lock_irqsave(&usb->tx_lock, flags);
+	if (usb->tx_pending && usb->in_ep && usb->in_req) {
+		spin_unlock_irqrestore(&usb->tx_lock, flags);
+		ret = usb_ep_dequeue(usb->in_ep, usb->in_req);
+		if (ret && ret != -EINVAL)
+			pr_warn("abk_fido_key: dequeue of stuck IN request failed: %d\n",
+				ret);
+		/* tx_complete clears tx_pending when the dequeue completes. */
+	} else {
+		spin_unlock_irqrestore(&usb->tx_lock, flags);
+	}
 
 	cid = get_unaligned_be32(packet);
 	header = packet[4];
@@ -4129,6 +4149,7 @@ static void abk_fido_tx_kick(struct abk_fido_usb *usb)
 		spin_lock_irqsave(&usb->tx_lock, flags);
 		usb->tx_pending = false;
 		spin_unlock_irqrestore(&usb->tx_lock, flags);
+		pr_warn("abk_fido_key: failed to queue IN response: %d\n", ret);
 	}
 }
 
@@ -4328,6 +4349,7 @@ static int abk_fido_setup(struct usb_function *f,
 static void abk_fido_disable(struct usb_function *f)
 {
 	struct abk_fido_usb *usb = container_of(f, struct abk_fido_usb, func);
+	struct abk_fido_report stale;
 	unsigned int i;
 	unsigned long flags;
 
@@ -4340,6 +4362,12 @@ static void abk_fido_disable(struct usb_function *f)
 	usb->tx_pending = false;
 	usb->online = false;
 	spin_unlock_irqrestore(&usb->tx_lock, flags);
+
+	/* Drop responses queued for the session that just died: they carry
+	 * stale request state and would poison the next enumeration.
+	 */
+	while (abk_fido_queue_pop(&usb->tx_packets, &stale))
+		;
 
 	if (usb->in_req) {
 		free_ep_req(usb->in_ep, usb->in_req);
@@ -4631,6 +4659,22 @@ static ssize_t attach_state_show(struct kobject *kobj,
 	ret = sysfs_emit(buf, "%s\n", abk_fido_dev.attach_state);
 	mutex_unlock(&abk_fido_dev.lock);
 	return ret;
+}
+
+/* USB transport health: a stuck tx_pending is exactly the state that makes
+ * Windows show "touch your key" forever after the phone already approved.
+ */
+static ssize_t hid_state_show(struct kobject *kobj,
+			      struct kobj_attribute *attr, char *buf)
+{
+	struct abk_fido_usb *usb = abk_fido_dev.usb;
+
+	if (!usb)
+		return sysfs_emit(buf, "no_gadget\n");
+	return sysfs_emit(buf,
+			  "online=%u tx_pending=%u tx_q=%u rx_q=%u\n",
+			  usb->online, usb->tx_pending,
+			  usb->tx_packets.count, usb->rx_packets.count);
 }
 
 /* Fixed P-256 keypair, salts and expected outputs for the hmac-secret
@@ -4940,6 +4984,7 @@ static struct kobj_attribute udc_attr = __ATTR_RO(udc);
 static struct kobj_attribute hid_dev_attr = __ATTR_RO(hid_dev);
 static struct kobj_attribute ctap_dev_attr = __ATTR_RO(ctap_dev);
 static struct kobj_attribute attach_state_attr = __ATTR_RO(attach_state);
+static struct kobj_attribute hid_state_attr = __ATTR_RO(hid_state);
 static struct kobj_attribute hmac_selftest_attr = __ATTR_RO(hmac_selftest);
 static struct kobj_attribute credential_count_attr = __ATTR_RO(credential_count);
 static struct kobj_attribute last_error_attr = __ATTR_RO(last_error);
@@ -4970,6 +5015,7 @@ static struct attribute *abk_fido_attrs[] = {
 	&hid_dev_attr.attr,
 	&ctap_dev_attr.attr,
 	&attach_state_attr.attr,
+	&hid_state_attr.attr,
 	&hmac_selftest_attr.attr,
 	&credential_count_attr.attr,
 	&last_error_attr.attr,

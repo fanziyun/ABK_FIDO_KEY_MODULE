@@ -203,6 +203,16 @@ class DriverShapeTest(unittest.TestCase):
             "v2 loader lost the legacy-CRC fallback",
         )
 
+    def test_userspace_v1_blob_write_is_refused(self) -> None:
+        # A pre-0.3.0 companion writes the v1 layout and has already failed
+        # to parse the v2 blob it read back, so honoring the write wipes the
+        # store and regenerates the aaguid (Windows then treats the key as a
+        # new device). Only the on-disk loader still upgrades real v1 files.
+        self._assert_text(
+            "v1 blob refused from userspace",
+            "userspace v1 write is no longer refused",
+        )
+
     def test_getinfo_advertises_the_extension(self) -> None:
         self._assert_text(
             'abk_cbor_put_text(&w, "hmac-secret");',

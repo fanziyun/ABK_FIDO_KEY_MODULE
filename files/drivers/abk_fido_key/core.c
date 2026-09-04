@@ -130,6 +130,7 @@
 #define ABK_FIDO_HID_ERR_OTHER			0x7f
 
 #define ABK_FIDO_CTAP_SUCCESS			0x00
+#define ABK_FIDO_CTAP_KEEPALIVE		0x3D
 #define ABK_FIDO_CTAP_ERR_INVALID_COMMAND	0x01
 #define ABK_FIDO_CTAP_ERR_INVALID_PARAMETER	0x02
 #define ABK_FIDO_CTAP_ERR_INVALID_LENGTH	0x03
@@ -381,6 +382,12 @@ struct abk_fido_device {
 	 * shows the key on the host can be diagnosed over sysfs.
 	 */
 	char attach_state[64];
+	/* The transport waiting on the auth decision, so keepalive status
+	 * messages can be sent to the right endpoint while the user decides.
+	 */
+	struct abk_fido_usb *auth_usb;
+	u32 auth_cid;
+	struct delayed_work auth_keepalive_work;
 	wait_queue_head_t auth_wait;
 	bool auth_pending;
 	bool auth_decided;
@@ -591,6 +598,9 @@ static struct usb_gadget_strings *abk_fido_func_strings[] = {
 };
 
 static void abk_fido_set_last_trace_locked(const char *fmt, ...);
+static void abk_fido_send_cbor_result(struct abk_fido_usb *usb, u32 cid,
+				      u8 status, const u8 *payload,
+				      size_t payload_len);
 static int abk_fido_store_from_disk_into(struct abk_fido_store_disk *disk,
 					 struct abk_fido_store *store,
 					 char *reason, size_t reason_len);
@@ -2239,6 +2249,33 @@ static void abk_fido_auth_start_cooldown_locked(void)
 		msecs_to_jiffies(ABK_FIDO_AUTH_DENY_MS);
 }
 
+/* Keepalive pacer. Windows webauthn's HID read gives up after ~2 s of
+ * silence, so while the auth decision is pending on the phone the driver
+ * sends CTAP2_STATUS_KEEPALIVE every 500 ms - exactly what hardware
+ * security keys do while waiting for a touch. Without this, any approval
+ * that takes longer than a couple of seconds is answered into a dead
+ * client, which is why "approve fast works, approve slow never returns".
+ */
+static void abk_fido_auth_keepalive_worker(struct work_struct *work)
+{
+	struct abk_fido_usb *usb;
+	u32 cid;
+	bool pending;
+
+	mutex_lock(&abk_fido_dev.lock);
+	pending = abk_fido_dev.auth_pending && !abk_fido_dev.auth_decided;
+	usb = abk_fido_dev.auth_usb;
+	cid = abk_fido_dev.auth_cid;
+	mutex_unlock(&abk_fido_dev.lock);
+
+	if (!pending || !usb)
+		return;
+
+	abk_fido_send_cbor_result(usb, cid, ABK_FIDO_CTAP_KEEPALIVE, NULL, 0);
+	mod_delayed_work(system_wq, &abk_fido_dev.auth_keepalive_work,
+			 msecs_to_jiffies(500));
+}
+
 static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, bool rk)
 {
 	long wait_ret;
@@ -2289,6 +2326,8 @@ static int abk_fido_auth_begin_locked(u8 ctap_cmd, const char *rp_id, bool uv, b
 		request_id, abk_fido_ctap_name(ctap_cmd), rp_id, uv, rk);
 	pr_info("abk_fido_key: auth pending req=%u cmd=%s rp=%s uv=%u rk=%u\n",
 		request_id, abk_fido_ctap_name(ctap_cmd), rp_id, uv, rk);
+	mod_delayed_work(system_wq, &abk_fido_dev.auth_keepalive_work,
+			 msecs_to_jiffies(500));
 	mutex_unlock(&abk_fido_dev.lock);
 	abk_fido_bootstrap_companion_service();
 	wake_up_interruptible(&abk_fido_dev.auth_wait);
@@ -3923,7 +3962,19 @@ static void abk_fido_dispatch_msg(struct abk_fido_usb *usb, u32 cid, u8 cmd,
 		mutex_unlock(&abk_fido_dev.lock);
 		return;
 	case ABK_FIDO_HID_CBOR:
+		mutex_lock(&abk_fido_dev.lock);
+		abk_fido_dev.auth_usb = usb;
+		abk_fido_dev.auth_cid = cid;
+		mutex_unlock(&abk_fido_dev.lock);
 		ret = abk_fido_cbor_dispatch(data, len, payload, &payload_len);
+		/* No more keepalives for this transaction: clear the transport
+		 * first (so a racing worker sends nothing) and drain a worker
+		 * that is already mid-send before the response goes out.
+		 */
+		mutex_lock(&abk_fido_dev.lock);
+		abk_fido_dev.auth_usb = NULL;
+		mutex_unlock(&abk_fido_dev.lock);
+		cancel_delayed_work_sync(&abk_fido_dev.auth_keepalive_work);
 		if (!ret) {
 			mutex_lock(&abk_fido_dev.lock);
 			abk_fido_dev.last_error[0] = '\0';
@@ -5198,6 +5249,8 @@ static int __init abk_fido_core_init(void)
 	if (!abk_fido_dev.kobj)
 		return -ENOMEM;
 	init_waitqueue_head(&abk_fido_dev.auth_wait);
+	INIT_DELAYED_WORK(&abk_fido_dev.auth_keepalive_work,
+			  abk_fido_auth_keepalive_worker);
 
 	ret = sysfs_create_group(abk_fido_dev.kobj, &abk_fido_attr_group);
 	if (ret) {
@@ -5262,6 +5315,7 @@ static int __init abk_fido_core_init(void)
 
 static void __exit abk_fido_core_exit(void)
 {
+	cancel_delayed_work_sync(&abk_fido_dev.auth_keepalive_work);
 #if IS_ENABLED(CONFIG_ABK_CONTROL)
 	abk_control_unregister(&abk_fido_control_ops);
 #endif

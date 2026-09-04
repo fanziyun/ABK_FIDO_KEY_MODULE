@@ -127,6 +127,18 @@ class WindowsHelloShapeTest(unittest.TestCase):
             "hid_state_attr", "hid_state diagnostic node missing"
         )
 
+    def test_keepalive_paces_the_auth_wait(self) -> None:
+        # Windows webauthn's HID read gives up after ~2 s of silence, so the
+        # driver sends CTAP2_STATUS_KEEPALIVE every 500 ms while the
+        # approval is pending on the phone (device-verified: fast approval
+        # worked, slow approval never returned before this).
+        self._assert_text(
+            "ABK_FIDO_CTAP_KEEPALIVE", "keepalive status define missing"
+        )
+        self._assert_text(
+            "abk_fido_auth_keepalive_worker", "keepalive worker missing"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

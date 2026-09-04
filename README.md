@@ -191,7 +191,10 @@ assembled.
   and there is no switch that turns that off (`auth_gate_enabled` always reads
   `1` and refuses a `0`). One approval covers further requests for 3 s; a
   refused, cancelled or unanswered prompt instead blocks every request for 3 s.
-  `/sys/kernel/abk_fido_key/auth_cooldown` reports both windows.
+  `/sys/kernel/abk_fido_key/auth_cooldown` reports both windows. While the
+  decision is pending the driver paces the wait with `CTAP2_STATUS_KEEPALIVE`
+  every 500 ms, like hardware security keys do; Windows webauthn's HID read
+  gives up after ~2 s of silence otherwise.
 - Silent requests with nothing to answer are refused. A `getAssertion` with
   the `up` option cleared is the probe browsers use to discover which
   credential ids exist: when no credential matches the request it gets

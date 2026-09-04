@@ -347,6 +347,16 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
   CTAP2 §6.6 方案（SHA-256(ECDH x)、AES-256-CBC、HMAC-SHA-256）应答
   `hmacGetSecret`。测试步骤与排障清单见
   [`docs/windows-hello.md`](docs/windows-hello.md)。
+- The phone must be in **MTP (文件传输)** USB mode for Windows to enumerate
+  the key. In charge-only + USB-debugging mode Android presents the
+  `VID_18D1/PID_4E11` adb configuration, which a device-level WinUSB driver
+  claims whole — the FIDO HID interface in the same configuration gets no
+  device node and Windows Hello never sees the key. Set 开发者选项 → 默认
+  USB 配置 → 文件传输 to make it the default.
+  手机 USB 模式必须是**文件传输 (MTP)**：仅充电 + USB 调试模式下 Android
+  使用 `VID_18D1/PID_4E11` 的 adb 配置，被 Windows 设备级 WinUSB 驱动整体
+  抢占，同一配置里的 FIDO HID 接口拿不到设备节点，Windows Hello 看不到
+  钥匙。建议把「默认 USB 配置」设为文件传输。
 - The persisted store is now version 2: each credential carries its
   hmac-secret. Version 1 blobs are still loaded (kernel and companion app) and
   are upgraded to v2 on the next write; credentials migrated from v1 have no

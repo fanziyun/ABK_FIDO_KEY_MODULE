@@ -34,6 +34,52 @@ adb shell su -c 'cat /sys/kernel/abk_fido_key/hmac_selftest'
 
 ## Step 1 — USB enumeration / USB 枚举
 
+### 关键前提：USB 模式必须是「文件传输 / MTP」 / USB mode must be MTP
+
+When the phone stays in charge-only + USB-debugging mode, Android presents the
+`VID_18D1/PID_4E11` adb configuration. Windows matches a **device-level**
+WinUSB driver for that identity and claims the *whole* device, so the FIDO
+HID interface that lives in the same configuration never gets its own device
+node — Windows Hello cannot see the key even though the driver is online
+(`attach_state` still reports `online_iface:N`, because the host did select
+the configuration).
+
+手机处于「仅充电 + USB 调试」时，Android 使用 `VID_18D1/PID_4E11` 的 adb
+配置。Windows 会为这个身份匹配**设备级** WinUSB 驱动并整体抢占设备，同一
+配置里的 FIDO HID 接口因此拿不到自己的设备节点——驱动虽已上线
+（`attach_state` 仍是 `online_iface:N`），Windows Hello 却看不到钥匙。
+
+Fix: 设置 → USB 偏好（或 开发者选项 → 默认 USB 配置）→ **文件传输 / MTP**。
+建议把「默认 USB 配置」也改成文件传输，插上即是 MTP。
+
+With MTP the phone enumerates as a composite (e.g. `VID_2717/PID_FF48`) that
+no device-level driver claims; Windows splits it with usbccgp and the key
+appears as **HID-compliant fido**. Quick verification from any machine with
+`python-fido2`:
+
+MTP 模式下手机以复合设备枚举（如 `VID_2717/PID_FF48`），没有设备级驱动抢占，
+usbccgp 正常拆分，钥匙显示为 **HID-compliant fido**。可用 `python-fido2`
+快速验证：
+
+```bash
+python3 -c "from fido2.hid import CtapHidDevice; print(list(CtapHidDevice.list_devices()))"
+# expect: product_name='ABK Security Key'
+```
+
+and a full protocol probe:
+
+```bash
+python3 -c "
+from fido2.hid import CtapHidDevice, open_connection
+from fido2.ctap2 import Ctap2
+d = next(iter(CtapHidDevice.list_devices()))
+c = open_connection(d.descriptor)
+print(Ctap2(CtapHidDevice(d.descriptor, c)).get_info())
+"
+# expect versions ['FIDO_2_0'], extensions ['hmac-secret'],
+# options rk/up/uv True
+```
+
 Plug the phone in, then check both ends.
 
 ### Phone side / 手机端

@@ -41,6 +41,9 @@
 #include <crypto/ecc_curve.h>
 #include <crypto/ecdh.h>
 #include <crypto/hash.h>
+#include <crypto/kpp.h>
+#include <crypto/skcipher.h>
+#include <crypto/aes.h>
 /*
  * The internal ECC header moved in v5.16: 5.15 keeps it at crypto/ecc.h, which
  * is not under include/, so it is only reachable by relative path. 5.16 and
@@ -91,8 +94,16 @@
 #define ABK_FIDO_ASSERT_WINDOW_MS		30000
 #define ABK_FIDO_STORE_PATH			"/metadata/abk_fido_store.bin"
 #define ABK_FIDO_STORE_MAGIC			0x41424646
-#define ABK_FIDO_STORE_VERSION			1
+#define ABK_FIDO_STORE_VERSION			2
+/* Version 1 on-disk blobs are still readable and are upgraded in place. */
+#define ABK_FIDO_STORE_VERSION_LEGACY		1
 #define ABK_FIDO_PIN_RETRIES_DEFAULT		8
+/* hmac-secret extension (CTAP2 6.6, classic form): 32-byte per-credential
+ * secret, 32-byte salts and outputs.
+ */
+#define ABK_FIDO_HMAC_SECRET_LEN		32
+#define ABK_FIDO_HMAC_SALT_LEN			32
+#define ABK_FIDO_HMAC_SALT_AUTH_LEN		16
 #define ABK_FIDO_PERSIST_ENABLED \
 	(IS_ENABLED(CONFIG_ABK_FIDO_KEY_PERSIST_METADATA) || \
 	 IS_ENABLED(CONFIG_ABK_FIDO_KEY_PERSIST_ADB_DATA))
@@ -205,6 +216,10 @@ struct abk_fido_credential {
 	char user_display[ABK_FIDO_MAX_USER_NAME];
 	u8 priv_key[32];
 	u8 pub_key[64];
+	/* hmac-secret: 32 random bytes created when the platform asks for the
+	 * extension at makeCredential time; all zero means "no secret".
+	 */
+	u8 hmac_secret[ABK_FIDO_HMAC_SECRET_LEN];
 };
 
 struct abk_fido_store {
@@ -229,6 +244,10 @@ struct abk_fido_store_disk_cred {
 	char user_display[ABK_FIDO_MAX_USER_NAME];
 	u8 priv_key[32];
 	u8 pub_key[64];
+	/* hmac-secret: 32 random bytes created when the platform asks for the
+	 * extension at makeCredential time; all zero means "no secret".
+	 */
+	u8 hmac_secret[ABK_FIDO_HMAC_SECRET_LEN];
 };
 
 struct abk_fido_store_disk {
@@ -243,6 +262,38 @@ struct abk_fido_store_disk {
 	u8 pin_hash[16];
 	u8 pin_token[32];
 	struct abk_fido_store_disk_cred creds[ABK_FIDO_MAX_CREDS];
+};
+
+/* Version 1 on-disk layout, kept only so old blobs load and upgrade. Every
+ * field matches the current layout up to the credential array, whose entries
+ * are ABK_FIDO_HMAC_SECRET_LEN bytes shorter (no hmac_secret).
+ */
+struct abk_fido_store_disk_cred_v1 {
+	u8 in_use;
+	u8 resident;
+	u8 user_id_len;
+	u8 reserved0;
+	u8 cred_id[32];
+	u8 user_id[ABK_FIDO_MAX_USER_ID];
+	char rp_id[ABK_FIDO_MAX_RP_ID];
+	char user_name[ABK_FIDO_MAX_USER_NAME];
+	char user_display[ABK_FIDO_MAX_USER_NAME];
+	u8 priv_key[32];
+	u8 pub_key[64];
+};
+
+struct abk_fido_store_disk_v1 {
+	u32 magic;
+	u32 version;
+	u32 crc32;
+	u32 sign_count;
+	u8 aaguid[16];
+	u8 pin_set;
+	u8 pin_retries;
+	u8 reserved1[2];
+	u8 pin_hash[16];
+	u8 pin_token[32];
+	struct abk_fido_store_disk_cred_v1 creds[ABK_FIDO_MAX_CREDS];
 };
 
 struct abk_fido_slice {
@@ -271,6 +322,8 @@ struct abk_fido_make_cred_req {
 	bool uv;
 	bool up_disabled;
 	bool pin_auth_present;
+	/* hmac-secret extension (classic CTAP2 6.6 form Windows Hello uses). */
+	bool hmac_secret_requested;
 	u8 client_data_hash[32];
 	char rp_id[ABK_FIDO_MAX_RP_ID];
 	u8 user_id[ABK_FIDO_MAX_USER_ID];
@@ -291,6 +344,13 @@ struct abk_fido_get_assert_req {
 	bool uv;
 	bool up_disabled;
 	bool pin_auth_present;
+	/* hmac-secret extension: the platform's ECDH key and the wrapped
+	 * salts. key_agreement is the raw P-256 point x || y.
+	 */
+	bool hmac_secret_requested;
+	u8 hmac_key_agreement[64];
+	u8 hmac_salt_enc[ABK_FIDO_HMAC_SALT_LEN * 2];
+	u8 hmac_salt_auth[ABK_FIDO_HMAC_SALT_AUTH_LEN];
 	u8 client_data_hash[32];
 	char rp_id[ABK_FIDO_MAX_RP_ID];
 	struct {
@@ -316,6 +376,11 @@ struct abk_fido_device {
 	char udc_name[64];
 	char last_error[160];
 	char last_trace[256];
+	/* Gadget auto-attach pipeline state, updated by
+	 * abk_fido_key_prepare_config() / bind / set_alt so a phone that never
+	 * shows the key on the host can be diagnosed over sysfs.
+	 */
+	char attach_state[64];
 	wait_queue_head_t auth_wait;
 	bool auth_pending;
 	bool auth_decided;
@@ -375,6 +440,7 @@ struct abk_fido_usb {
 static struct abk_fido_device abk_fido_dev = {
 	.lock = __MUTEX_INITIALIZER(abk_fido_dev.lock),
 	.next_cid = 1,
+	.attach_state = "not_configured",
 };
 
 /* A transport-independent CTAP HID endpoint for local consumers (Credential
@@ -417,12 +483,30 @@ static struct usb_interface_descriptor abk_fido_intf_desc = {
 	.bInterfaceProtocol = 0,
 };
 
-static struct hid_descriptor abk_fido_hid_desc = {
-	.bLength = sizeof(abk_fido_hid_desc),
+/* USB HID descriptor (HID_DT_HID). The kernel's struct hid_descriptor
+ * carries a trailing hid_class_descriptor array, so its sizeof() is 10 while
+ * the wire format is exactly 9 bytes; model the 9-byte layout here so
+ * bLength and the returned bytes always agree, independent of the kernel
+ * header's shape on a given line.
+ */
+struct abk_fido_hid_desc {
+	__u8 bLength;
+	__u8 bDescriptorType;
+	__le16 bcdHID;
+	__u8 bCountryCode;
+	__u8 bNumDescriptors;
+	__u8 bClassDescriptorType;
+	__le16 wDescriptorLength;
+} __attribute__((packed));
+
+static struct abk_fido_hid_desc abk_fido_hid_desc = {
+	.bLength = sizeof(struct abk_fido_hid_desc),
 	.bDescriptorType = HID_DT_HID,
 	.bcdHID = cpu_to_le16(0x0111),
 	.bCountryCode = 0,
 	.bNumDescriptors = 1,
+	.bClassDescriptorType = HID_DT_REPORT,
+	.wDescriptorLength = cpu_to_le16(ABK_FIDO_REPORT_DESC_LEN),
 };
 
 static struct usb_endpoint_descriptor abk_fido_fs_in_desc = {
@@ -647,6 +731,168 @@ static int abk_fido_sha256(const u8 *data, size_t len, u8 out[SHA256_DIGEST_SIZE
 	return abk_fido_shash_digest("sha256", data, len, out, SHA256_DIGEST_SIZE);
 }
 
+static int abk_fido_hmac_sha256(const u8 *key, size_t key_len,
+				const u8 *data, size_t data_len,
+				u8 out[SHA256_DIGEST_SIZE])
+{
+	struct crypto_shash *tfm;
+	struct shash_desc *desc;
+	size_t size;
+	int ret;
+
+	tfm = crypto_alloc_shash("hmac(sha256)", 0, 0);
+	if (IS_ERR(tfm)) {
+		pr_warn_ratelimited("abk_fido_key: hmac(sha256) unavailable: %ld\n",
+				    PTR_ERR(tfm));
+		return PTR_ERR(tfm);
+	}
+
+	size = sizeof(*desc) + crypto_shash_descsize(tfm);
+	desc = kzalloc(size, GFP_KERNEL);
+	if (!desc) {
+		crypto_free_shash(tfm);
+		return -ENOMEM;
+	}
+
+	desc->tfm = tfm;
+	ret = crypto_shash_setkey(tfm, key, key_len);
+	if (!ret)
+		ret = crypto_shash_digest(desc, data, data_len, out);
+	kfree(desc);
+	crypto_free_shash(tfm);
+	return ret;
+}
+
+/* The classic hmac-secret extension seals both directions with AES-256-CBC
+ * under an all-zero 16-byte IV, exactly like fido2's PinProtocolV1.
+ */
+static const u8 abk_fido_hmac_zero_iv[16];
+
+/* In-place AES-256-CBC. in_len must be a multiple of the block size. */
+static int abk_fido_aes256_cbc(const u8 key[32], const u8 iv[16],
+			       u8 *inout, size_t in_len, bool encrypt)
+{
+	struct crypto_skcipher *tfm;
+	struct scatterlist sg;
+	int ret;
+
+	if (!in_len || in_len % AES_BLOCK_SIZE)
+		return -EINVAL;
+
+	tfm = crypto_alloc_skcipher("cbc(aes)", 0, 0);
+	if (IS_ERR(tfm)) {
+		pr_warn_ratelimited("abk_fido_key: cbc(aes) unavailable: %ld\n",
+				    PTR_ERR(tfm));
+		return PTR_ERR(tfm);
+	}
+	{
+		SYNC_SKCIPHER_REQUEST_ON_STACK(req, tfm);
+		struct crypto_wait wait;
+
+		crypto_init_wait(&wait);
+		ret = crypto_skcipher_setkey(tfm, key, 32);
+		if (!ret) {
+			sg_init_one(&sg, inout, in_len);
+			skcipher_request_set_tfm(req, tfm);
+			skcipher_request_set_callback(req,
+						      CRYPTO_TFM_REQ_MAY_BACKLOG,
+						      crypto_req_done, &wait);
+			skcipher_request_set_crypt(req, &sg, &sg, in_len, iv);
+
+			if (encrypt)
+				ret = crypto_skcipher_encrypt(req);
+			else
+				ret = crypto_skcipher_decrypt(req);
+			/* Wait out any async completion; with MAY_BACKLOG the
+			 * request is otherwise dropped as a confusing error.
+			 */
+			ret = crypto_wait_req(ret, &wait);
+		}
+		skcipher_request_zero(req);
+	}
+	crypto_free_skcipher(tfm);
+	return ret;
+}
+
+static int abk_fido_kpp_run_sync(struct crypto_kpp *tfm, bool compute_shared,
+				 const u8 *in, unsigned int in_len,
+				 u8 *out, unsigned int out_len)
+{
+	struct kpp_request *req;
+	struct crypto_wait wait;
+	struct scatterlist in_sg, out_sg;
+	int ret;
+
+	req = kpp_request_alloc(tfm, GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
+	crypto_init_wait(&wait);
+	kpp_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				 crypto_req_done, &wait);
+	/* kpp requests carry scatterlists; the ecdh driver copies req->src
+	 * with sg_copy_to_buffer(), so a raw pointer here would be read as
+	 * scatterlist metadata and crash or corrupt memory.
+	 */
+	sg_init_one(&in_sg, in, in_len);
+	sg_init_one(&out_sg, out, out_len);
+	kpp_request_set_input(req, &in_sg, in_len);
+	kpp_request_set_output(req, &out_sg, out_len);
+
+	if (compute_shared)
+		ret = crypto_kpp_compute_shared_secret(req);
+	else
+		ret = crypto_kpp_generate_public_key(req);
+	ret = crypto_wait_req(ret, &wait);
+	kpp_request_free(req);
+	return ret;
+}
+
+/* ECDH over P-256: shared = SHA-256(x-coordinate), the derivation the
+ * classic hmac-secret extension (and PIN/UV protocol v1) uses. peer_xy is
+ * the raw platform point x || y (64 bytes). The private key wire format is
+ * crypto_ecdh_encode_key(): kpp_secret + u16 key_size + key.
+ */
+static int abk_fido_ecdh_p256(const u8 priv[32], const u8 peer_xy[64],
+			      u8 shared[SHA256_DIGEST_SIZE])
+{
+	struct crypto_kpp *tfm;
+	u8 secret[sizeof(struct kpp_secret) + sizeof(u16) + 32];
+	u8 raw_x[32];
+	int ret;
+
+	tfm = crypto_alloc_kpp("ecdh-nist-p256", 0, 0);
+	if (IS_ERR(tfm)) {
+		pr_warn_ratelimited("abk_fido_key: ecdh-nist-p256 unavailable: %ld\n",
+				    PTR_ERR(tfm));
+		return PTR_ERR(tfm);
+	}
+	{
+		struct kpp_secret ks = {
+			.type = CRYPTO_KPP_SECRET_TYPE_ECDH,
+			.len = sizeof(secret),
+		};
+		u16 key_size = 32;
+
+		memcpy(secret, &ks, sizeof(ks));
+		memcpy(secret + sizeof(ks), &key_size, sizeof(key_size));
+		memcpy(secret + sizeof(ks) + sizeof(key_size), priv, 32);
+	}
+
+	ret = crypto_kpp_set_secret(tfm, secret, sizeof(secret));
+	memzero_explicit(secret, sizeof(secret));
+	if (!ret)
+		ret = abk_fido_kpp_run_sync(tfm, true, peer_xy, 64,
+					    raw_x, sizeof(raw_x));
+	crypto_free_kpp(tfm);
+	if (ret)
+		return ret;
+
+	ret = abk_fido_sha256(raw_x, sizeof(raw_x), shared);
+	memzero_explicit(raw_x, sizeof(raw_x));
+	return ret;
+}
+
 static void abk_fido_bootstrap_companion_service(void)
 {
 	static char *argv[] = {
@@ -727,16 +973,35 @@ static ssize_t abk_fido_store_blob_write(struct file *filp, struct kobject *kobj
 	abk_fido_dev.store_blob_staging_len = max_t(size_t,
 		abk_fido_dev.store_blob_staging_len, off + count);
 
-	if (abk_fido_dev.store_blob_staging_len == size) {
+	if (abk_fido_dev.store_blob_staging_len == size ||
+	    abk_fido_dev.store_blob_staging_len ==
+		    sizeof(struct abk_fido_store_disk_v1)) {
+		bool legacy = abk_fido_dev.store_blob_staging_len ==
+			      sizeof(struct abk_fido_store_disk_v1);
+
 		disk = (struct abk_fido_store_disk *)abk_fido_dev.store_blob_staging;
-		ret = abk_fido_store_from_disk_into(disk, &abk_fido_dev.store,
-						    reason, sizeof(reason));
+		if (legacy)
+			ret = abk_fido_store_from_disk_v1_into(
+				(struct abk_fido_store_disk_v1 *)disk,
+				&abk_fido_dev.store, reason, sizeof(reason));
+		else
+			ret = abk_fido_store_from_disk_into(
+				disk, &abk_fido_dev.store, reason,
+				sizeof(reason));
 		if (!ret) {
 			abk_fido_dev.store_loaded = true;
 			abk_fido_dev.store_generation++;
-			abk_fido_finalize_restored_store_locked(
-				"store blob restored from userspace");
-			pr_info("abk_fido_key: store blob restored from userspace\n");
+			if (legacy) {
+				/* Next persist rewrites the blob as v2. */
+				abk_fido_dev.store_dirty = true;
+				abk_fido_finalize_restored_store_locked(
+					"store blob restored from userspace (legacy v1, will persist as v2)");
+			} else {
+				abk_fido_finalize_restored_store_locked(
+					"store blob restored from userspace");
+			}
+			pr_info("abk_fido_key: store blob restored from userspace%s\n",
+				legacy ? " (legacy v1)" : "");
 		} else {
 			snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
 				 "%s", reason[0] ? reason :
@@ -1301,6 +1566,88 @@ static void abk_cbor_put_array(struct abk_cbor_writer *w, u64 count)
 	abk_cbor_put_head(w, 4, count);
 }
 
+/* Parse a COSE_Key (EC2, P-256) map from the reader into raw x || y. Other
+ * members (alg, key_ops) are accepted and ignored, matching what CTAP2
+ * clients send for the hmac-secret keyAgreement parameter.
+ */
+static int abk_cbor_read_cose_p256_xy(struct abk_cbor_reader *r, u8 xy[64])
+{
+	u8 x[32] = {};
+	u8 y[32] = {};
+	bool have_kty = false, have_crv = false, have_x = false, have_y = false;
+	u64 count, i;
+	int ret;
+
+	ret = abk_cbor_read_map(r, &count);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < count; i++) {
+		s64 key;
+
+		ret = abk_cbor_read_int(r, &key);
+		if (ret)
+			return ret;
+
+		switch (key) {
+		case 1: { /* kty */
+			s64 kty;
+
+			ret = abk_cbor_read_int(r, &kty);
+			if (ret)
+				return ret;
+			have_kty = kty == ABK_FIDO_COSE_KTY_EC2;
+			break;
+		}
+		case -1: { /* crv */
+			s64 crv;
+
+			ret = abk_cbor_read_int(r, &crv);
+			if (ret)
+				return ret;
+			have_crv = crv == ABK_FIDO_COSE_CRV_P256;
+			break;
+		}
+		case -2: { /* x */
+			struct abk_fido_slice slice;
+
+			ret = abk_cbor_read_bytes(r, &slice);
+			if (ret)
+				return ret;
+			if (slice.len != 32)
+				return -EINVAL;
+			memcpy(x, slice.ptr, 32);
+			have_x = true;
+			break;
+		}
+		case -3: { /* y */
+			struct abk_fido_slice slice;
+
+			ret = abk_cbor_read_bytes(r, &slice);
+			if (ret)
+				return ret;
+			if (slice.len != 32)
+				return -EINVAL;
+			memcpy(y, slice.ptr, 32);
+			have_y = true;
+			break;
+		}
+		default:
+			ret = abk_cbor_skip(r);
+			if (ret)
+				return ret;
+			break;
+		}
+	}
+
+	if (!have_kty || !have_crv || !have_x || !have_y)
+		return -EINVAL;
+
+	memcpy(xy, x, 32);
+	memcpy(xy + 32, y, 32);
+	return 0;
+}
+
 static unsigned int abk_fido_count_credentials_locked(void)
 {
 	unsigned int i;
@@ -1313,17 +1660,22 @@ static unsigned int abk_fido_count_credentials_locked(void)
 	return count;
 }
 
-static u32 abk_fido_store_crc32(const struct abk_fido_store_disk *disk)
+static u32 abk_fido_store_crc32_range(const u8 *base, size_t total_len)
 {
 	u32 crc;
 	const u8 *ptr;
 	size_t len;
 
-	ptr = (const u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count);
-	len = sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count);
+	ptr = base + offsetof(struct abk_fido_store_disk_v1, sign_count);
+	len = total_len - offsetof(struct abk_fido_store_disk_v1, sign_count);
 
 	crc = crc32_le(~0U, ptr, len);
 	return ~crc;
+}
+
+static u32 abk_fido_store_crc32(const struct abk_fido_store_disk *disk)
+{
+	return abk_fido_store_crc32_range((const u8 *)disk, sizeof(*disk));
 }
 
 static void abk_fido_set_last_trace_locked(const char *fmt, ...)
@@ -1332,6 +1684,16 @@ static void abk_fido_set_last_trace_locked(const char *fmt, ...)
 
 	va_start(args, fmt);
 	vscnprintf(abk_fido_dev.last_trace, sizeof(abk_fido_dev.last_trace),
+		   fmt, args);
+	va_end(args);
+}
+
+static void abk_fido_set_attach_state_locked(const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+	vscnprintf(abk_fido_dev.attach_state, sizeof(abk_fido_dev.attach_state),
 		   fmt, args);
 	va_end(args);
 }
@@ -1399,6 +1761,87 @@ static int abk_fido_store_from_disk_into(struct abk_fido_store_disk *disk,
 		sc->user_display[ABK_FIDO_MAX_USER_NAME - 1] = '\0';
 		memcpy(sc->priv_key, dc->priv_key, sizeof(sc->priv_key));
 		memcpy(sc->pub_key, dc->pub_key, sizeof(sc->pub_key));
+		memcpy(sc->hmac_secret, dc->hmac_secret,
+		       sizeof(sc->hmac_secret));
+	}
+	return 0;
+}
+
+/* Load a version 1 blob. Identical to the v2 loader except that every
+ * credential's hmac_secret is left all-zero: credentials minted before the
+ * extension existed simply have no secret, and Windows Hello re-registers
+ * them when offline unlock is wanted.
+ */
+static int abk_fido_store_from_disk_v1_into(struct abk_fido_store_disk_v1 *disk,
+					    struct abk_fido_store *store,
+					    char *reason, size_t reason_len)
+{
+	unsigned int i;
+	u32 crc;
+
+	if (le32_to_cpu(disk->magic) != ABK_FIDO_STORE_MAGIC) {
+		if (reason && reason_len)
+			scnprintf(reason, reason_len, "invalid store magic 0x%x",
+				  le32_to_cpu(disk->magic));
+		return -EINVAL;
+	}
+	if (le32_to_cpu(disk->version) != ABK_FIDO_STORE_VERSION_LEGACY) {
+		if (reason && reason_len)
+			scnprintf(reason, reason_len, "invalid store version %u",
+				  le32_to_cpu(disk->version));
+		return -EINVAL;
+	}
+
+	crc = abk_fido_store_crc32_range((const u8 *)disk, sizeof(*disk));
+	if (crc != le32_to_cpu(disk->crc32)) {
+		/* Older driver variants sealed the blob with the plain
+		 * crc32_le(0, sign_count..end) form. Rejecting it here would
+		 * make every such device reinitialize an EMPTY store on
+		 * upgrade, wiping all credentials, so accept it like the v2
+		 * loader always did.
+		 */
+		u32 legacy_crc = crc32_le(0,
+			(u8 *)disk + offsetof(struct abk_fido_store_disk_v1, sign_count),
+			sizeof(*disk) - offsetof(struct abk_fido_store_disk_v1, sign_count));
+
+		if (legacy_crc == le32_to_cpu(disk->crc32)) {
+			pr_info("abk_fido_key: accepted legacy v1 store crc 0x%08x\n",
+				legacy_crc);
+		} else {
+			if (reason && reason_len)
+				scnprintf(reason, reason_len,
+					  "invalid store crc stored=0x%08x calc=0x%08x legacy=0x%08x",
+					  le32_to_cpu(disk->crc32), crc, legacy_crc);
+			return -EILSEQ;
+		}
+	}
+
+	memset(store, 0, sizeof(*store));
+	store->sign_count = le32_to_cpu(disk->sign_count);
+	memcpy(store->aaguid, disk->aaguid, sizeof(disk->aaguid));
+	store->pin_set = disk->pin_set;
+	store->pin_retries = disk->pin_retries;
+	memcpy(store->pin_hash, disk->pin_hash, sizeof(disk->pin_hash));
+	memcpy(store->pin_token, disk->pin_token, sizeof(disk->pin_token));
+
+	for (i = 0; i < ABK_FIDO_MAX_CREDS; i++) {
+		struct abk_fido_store_disk_cred_v1 *dc = &disk->creds[i];
+		struct abk_fido_credential *sc = &store->creds[i];
+
+		sc->in_use = !!dc->in_use;
+		sc->resident = !!dc->resident;
+		sc->user_id_len = min_t(u8, dc->user_id_len, ABK_FIDO_MAX_USER_ID);
+		memcpy(sc->cred_id, dc->cred_id, sizeof(sc->cred_id));
+		memcpy(sc->user_id, dc->user_id, sizeof(sc->user_id));
+		memcpy(sc->rp_id, dc->rp_id, sizeof(sc->rp_id));
+		sc->rp_id[ABK_FIDO_MAX_RP_ID - 1] = '\0';
+		memcpy(sc->user_name, dc->user_name, sizeof(sc->user_name));
+		sc->user_name[ABK_FIDO_MAX_USER_NAME - 1] = '\0';
+		memcpy(sc->user_display, dc->user_display, sizeof(sc->user_display));
+		sc->user_display[ABK_FIDO_MAX_USER_NAME - 1] = '\0';
+		memcpy(sc->priv_key, dc->priv_key, sizeof(sc->priv_key));
+		memcpy(sc->pub_key, dc->pub_key, sizeof(sc->pub_key));
+		/* hmac_secret stays zero: a v1 credential has no secret. */
 	}
 	return 0;
 }
@@ -1432,6 +1875,8 @@ static void abk_fido_store_to_disk(struct abk_fido_store_disk *disk)
 		strscpy(dc->user_display, sc->user_display, sizeof(dc->user_display));
 		memcpy(dc->priv_key, sc->priv_key, sizeof(dc->priv_key));
 		memcpy(dc->pub_key, sc->pub_key, sizeof(dc->pub_key));
+		memcpy(dc->hmac_secret, sc->hmac_secret,
+		       sizeof(dc->hmac_secret));
 	}
 
 	crc = abk_fido_store_crc32(disk);
@@ -1606,7 +2051,8 @@ static int abk_fido_read_store_from_path_locked(const char *path,
 	}
 
 	read_ret = abk_fido_kernel_read(file, disk, sizeof(*disk), &pos);
-	if (read_ret != sizeof(*disk)) {
+	if (read_ret != sizeof(*disk) &&
+	    read_ret != sizeof(struct abk_fido_store_disk_v1)) {
 		ret = read_ret < 0 ? (int)read_ret : -EIO;
 		if (reason && reason_len)
 			scnprintf(reason, reason_len, "restore read %s failed: %d",
@@ -1614,11 +2060,11 @@ static int abk_fido_read_store_from_path_locked(const char *path,
 		goto out;
 	}
 
-	calc_crc = abk_fido_store_crc32(disk);
+	calc_crc = abk_fido_store_crc32_range((const u8 *)disk, read_ret);
 	legacy_crc = crc32_le(0,
-		(u8 *)disk + offsetof(struct abk_fido_store_disk, sign_count),
-		sizeof(*disk) - offsetof(struct abk_fido_store_disk, sign_count));
-	pr_info("abk_fido_key: read path=%s magic=0x%08x version=%u stored_crc=0x%08x calc_crc=0x%08x legacy_crc=0x%08x sign_count=%u head=%*phN\n",
+		(u8 *)disk + offsetof(struct abk_fido_store_disk_v1, sign_count),
+		read_ret - offsetof(struct abk_fido_store_disk_v1, sign_count));
+	pr_info("abk_fido_key: read path=%s magic=0x%08x version=%u stored_crc=0x%08x calc_crc=0x%08x legacy_crc=0x%08x sign_count=%u read=%zd head=%*phN\n",
 		path,
 		le32_to_cpu(disk->magic),
 		le32_to_cpu(disk->version),
@@ -1626,10 +2072,29 @@ static int abk_fido_read_store_from_path_locked(const char *path,
 		calc_crc,
 		legacy_crc,
 		le32_to_cpu(disk->sign_count),
+		read_ret,
 		16, disk);
 
-	ret = abk_fido_store_from_disk_into(disk, store, validation_reason,
-					    sizeof(validation_reason));
+	if (read_ret == sizeof(struct abk_fido_store_disk_v1)) {
+		/* A v1 blob is a strict prefix of the v2 layout, so the
+		 * freshly zeroed buffer casts back safely.
+		 */
+		pr_info("abk_fido_key: upgrading legacy v1 store from %s\n",
+			path);
+		ret = abk_fido_store_from_disk_v1_into(
+			(struct abk_fido_store_disk_v1 *)disk, store,
+			validation_reason, sizeof(validation_reason));
+		if (!ret) {
+			/* Persisted again as v2 on the next write. */
+			abk_fido_dev.store_dirty = true;
+			abk_fido_set_last_trace_locked(
+				"v1 store upgraded in memory; next persist writes v2");
+		}
+	} else {
+		ret = abk_fido_store_from_disk_into(disk, store,
+						    validation_reason,
+						    sizeof(validation_reason));
+	}
 	if (ret) {
 		if (reason && reason_len)
 			scnprintf(reason, reason_len, "%s (%s)",
@@ -2263,6 +2728,65 @@ static int abk_fido_parse_make_cred(const u8 *buf, size_t len,
 				return -EINVAL;
 			break;
 		}
+		case 6: {
+			u64 ext_count, j;
+
+			if (abk_cbor_read_map(&r, &ext_count))
+				return -EINVAL;
+			for (j = 0; j < ext_count; j++) {
+				struct abk_fido_slice ext_key;
+
+				if (abk_cbor_read_text(&r, &ext_key))
+					return -EINVAL;
+				if (abk_fido_slice_eq_text(ext_key, "hmac-secret")) {
+					u8 next;
+
+					/* Classic form is `true`; the CTAP 2.1
+					 * map {1: hmacCreateSecret} is accepted
+					 * too. Anything else is ignored.
+					 */
+					if (r.pos >= r.len)
+						return -EINVAL;
+					next = r.buf[r.pos];
+					if (next == 0xf4 || next == 0xf5) {
+						bool value;
+
+						if (abk_cbor_read_bool(&r, &value))
+							return -EINVAL;
+						req->hmac_secret_requested = value;
+					} else if ((next >> 5) == 5) {
+						u64 hm_count, k2;
+						bool create = true;
+
+						if (abk_cbor_read_map(&r, &hm_count))
+							return -EINVAL;
+						for (k2 = 0; k2 < hm_count; k2++) {
+							s64 mkey;
+
+							if (abk_cbor_read_int(&r, &mkey))
+								return -EINVAL;
+							if (mkey == 1) {
+								bool value;
+
+								if (abk_cbor_read_bool(&r, &value))
+									return -EINVAL;
+								create = value;
+							} else if (abk_cbor_skip(&r)) {
+								return -EINVAL;
+							}
+						}
+						req->hmac_secret_requested = create;
+					} else {
+						if (abk_cbor_skip(&r))
+							return -EINVAL;
+					}
+				} else {
+					if (abk_cbor_skip(&r))
+						return -EINVAL;
+				}
+			}
+			break;
+		}
 		default:
 			if (abk_cbor_skip(&r))
 				return -EINVAL;
@@ -2386,6 +2910,74 @@ static int abk_fido_parse_get_assert(const u8 *buf, size_t len,
 				return -EINVAL;
 			break;
 		}
+		case 4: {
+			u64 ext_count, j;
+
+			if (abk_cbor_read_map(&r, &ext_count))
+				return -EINVAL;
+			for (j = 0; j < ext_count; j++) {
+				struct abk_fido_slice ext_key;
+
+				if (abk_cbor_read_text(&r, &ext_key))
+					return -EINVAL;
+				if (abk_fido_slice_eq_text(ext_key, "hmac-secret")) {
+					u64 hm_count, k2;
+					bool have_ka = false;
+					bool have_enc = false;
+					bool have_auth = false;
+
+					if (abk_cbor_read_map(&r, &hm_count))
+						return -EINVAL;
+					for (k2 = 0; k2 < hm_count; k2++) {
+						s64 mkey;
+
+						if (abk_cbor_read_int(&r, &mkey))
+							return -EINVAL;
+						switch (mkey) {
+						case 1: /* keyAgreement */
+							if (abk_cbor_read_cose_p256_xy(&r,
+								req->hmac_key_agreement))
+								return -EINVAL;
+							have_ka = true;
+							break;
+						case 2: { /* saltEnc */
+							struct abk_fido_slice slice;
+
+							if (abk_cbor_read_bytes(&r, &slice) ||
+							    slice.len != ABK_FIDO_HMAC_SALT_LEN * 2)
+								return -EINVAL;
+							memcpy(req->hmac_salt_enc,
+							       slice.ptr, slice.len);
+							have_enc = true;
+							break;
+						}
+						case 3: { /* saltAuth */
+							struct abk_fido_slice slice;
+
+							if (abk_cbor_read_bytes(&r, &slice) ||
+							    slice.len != ABK_FIDO_HMAC_SALT_AUTH_LEN)
+								return -EINVAL;
+							memcpy(req->hmac_salt_auth,
+							       slice.ptr, slice.len);
+							have_auth = true;
+							break;
+						}
+						default:
+							if (abk_cbor_skip(&r))
+								return -EINVAL;
+							break;
+						}
+					}
+					if (!have_ka || !have_enc || !have_auth)
+						return -EINVAL;
+					req->hmac_secret_requested = true;
+				} else {
+					if (abk_cbor_skip(&r))
+						return -EINVAL;
+				}
+			}
+			break;
+		}
 		default:
 			if (abk_cbor_skip(&r))
 				return -EINVAL;
@@ -2478,6 +3070,7 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 	int ret;
 	u8 flags = ABK_FIDO_CRED_FLAG_UP;
 	bool is_selection = abk_fido_is_selection_make_credential(req);
+	bool hmac_secret = req->hmac_secret_requested;
 
 	pr_info("abk_fido_key: makeCredential rp=%s user=%s selection=%u\n",
 		req->rp_id[0] ? req->rp_id : "<empty>",
@@ -2493,12 +3086,12 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 	if (ret && ret != -ENOENT)
 		goto out_unlock;
 	abk_fido_set_last_trace_locked(
-		"makeCredential rp=%s exclude=%u uv=%u rk=%u pin_auth=%u",
+		"makeCredential rp=%s exclude=%u uv=%u rk=%u pin_auth=%u hmac=%u",
 		req->rp_id, req->exclude_count, req->uv, req->rk,
-		req->pin_auth_present);
-	pr_info("abk_fido_key: makeCredential rp=%s exclude=%u uv=%u rk=%u pin_auth=%u\n",
+		req->pin_auth_present, req->hmac_secret_requested);
+	pr_info("abk_fido_key: makeCredential rp=%s exclude=%u uv=%u rk=%u pin_auth=%u hmac=%u\n",
 		req->rp_id, req->exclude_count, req->uv, req->rk,
-		req->pin_auth_present);
+		req->pin_auth_present, req->hmac_secret_requested);
 
 	if (req->pin_auth_present) {
 		/* The client wants PIN based verification; this key only knows
@@ -2565,6 +3158,13 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 
 	abk_fido_p256_pub_to_bytes(pub_digits, cred->pub_key);
 
+	/* hmac-secret: the platform asked for a secret at registration time,
+	 * so mint one now. The response `true` is appended to authData below,
+	 * which tells Windows Hello the key can unlock offline.
+	 */
+	if (hmac_secret)
+		get_random_bytes(cred->hmac_secret, sizeof(cred->hmac_secret));
+
 	/* Nothing reaches this point without a fresh local approval, so the user
 	 * really was verified.
 	 */
@@ -2575,6 +3175,25 @@ static noinline_for_stack int abk_fido_make_credential_resp(struct abk_fido_make
 					      auth_data, &auth_data_len);
 	if (ret)
 		goto revert;
+
+	if (hmac_secret) {
+		struct abk_cbor_writer ew;
+
+		/* authData extensions: {"hmac-secret": true}. The client
+		 * reads it from authData (fido2 HmacSecretExtension), and it
+		 * is covered by the attestation signature below.
+		 */
+		abk_cbor_writer_init(&ew, auth_data + auth_data_len,
+				     sizeof(auth_data) - auth_data_len);
+		abk_cbor_put_map(&ew, 1);
+		abk_cbor_put_text(&ew, "hmac-secret");
+		abk_cbor_put_bool(&ew, true);
+		if (ew.err) {
+			ret = ew.err;
+			goto revert;
+		}
+		auth_data_len += ew.pos;
+	}
 
 	memcpy(to_sign, auth_data, auth_data_len);
 	memcpy(to_sign + auth_data_len, req->client_data_hash, 32);
@@ -2633,15 +3252,18 @@ static noinline_for_stack int abk_fido_encode_assertion_locked(unsigned int slot
 							      const u8 client_data_hash[32],
 							      bool include_user,
 							      unsigned int total_credentials,
+							      const u8 hmac_output[64],
 							      u8 *payload,
 							      size_t *payload_len)
 {
 	struct abk_fido_credential *cred = &abk_fido_dev.store.creds[slot];
-	u8 auth_data[64];
+	/* 37-byte authData header + the signed extensions CBOR suffix. */
+	u8 auth_data[200];
 	size_t auth_data_len;
 	u8 sig[ABK_FIDO_MAX_SIG_DER];
 	size_t sig_len;
-	u8 to_sign[128];
+	/* authData (up to 200 with extensions) + 32-byte clientDataHash. */
+	u8 to_sign[256];
 	struct abk_cbor_writer w;
 	unsigned int pairs = 3;
 	u32 sign_count;
@@ -2660,6 +3282,24 @@ static noinline_for_stack int abk_fido_encode_assertion_locked(unsigned int slot
 					   sign_count, auth_data, &auth_data_len);
 	if (ret)
 		return ret;
+
+	if (hmac_output) {
+		struct abk_cbor_writer ew;
+
+		/* authData extensions: {"hmac-secret": <64 bytes>}. The
+		 * client (fido2 HmacSecretExtension, Windows webauthn) reads
+		 * the output from authData and verifies it with the same
+		 * signature below.
+		 */
+		abk_cbor_writer_init(&ew, auth_data + auth_data_len,
+				     sizeof(auth_data) - auth_data_len);
+		abk_cbor_put_map(&ew, 1);
+		abk_cbor_put_text(&ew, "hmac-secret");
+		abk_cbor_put_bytes(&ew, hmac_output, 64);
+		if (ew.err)
+			return ew.err;
+		auth_data_len += ew.pos;
+	}
 
 	memcpy(to_sign, auth_data, auth_data_len);
 	memcpy(to_sign + auth_data_len, client_data_hash, 32);
@@ -2710,10 +3350,90 @@ static noinline_for_stack int abk_fido_encode_assertion_locked(unsigned int slot
 	return abk_fido_maybe_persist_locked();
 }
 
+/* hmac-secret getAssertion output (CTAP2 6.6 classic form):
+ *
+ *   Z        = SHA-256(ECDH x-coordinate)
+ *   saltAuth = HMAC-SHA-256(Z, saltEnc)[0:16]
+ *   output1  = HMAC-SHA-256(credSecret, salt1)
+ *   output2  = HMAC-SHA-256(credSecret, salt2)
+ *   response = AES-256-CBC(Z, iv=0, output1 || output2)
+ *
+ * A credential without a secret answers CTAP2_ERR_INVALID_OPTION so the
+ * client knows offline unlock is not available for it.
+ */
+static noinline_for_stack int abk_fido_hmac_get_secret_locked(
+	unsigned int slot, const struct abk_fido_get_assert_req *req,
+	u8 output[64])
+{
+	struct abk_fido_credential *cred = &abk_fido_dev.store.creds[slot];
+	u8 shared[SHA256_DIGEST_SIZE];
+	u8 salt[ABK_FIDO_HMAC_SALT_LEN * 2];
+	u8 tag[ABK_FIDO_HMAC_SALT_AUTH_LEN];
+	u8 outputs[64];
+	int ret;
+
+	if (!memchr_inv(cred->hmac_secret, 0, sizeof(cred->hmac_secret))) {
+		pr_info("abk_fido_key: hmac-secret refused: credential rp=%s has no secret\n",
+			cred->rp_id);
+		return ABK_FIDO_ERR_INVALID_OPTION;
+	}
+
+	ret = abk_fido_ecdh_p256(cred->priv_key, req->hmac_key_agreement,
+				 shared);
+	if (ret) {
+		pr_warn("abk_fido_key: hmac-secret ECDH failed: %d\n", ret);
+		goto out;
+	}
+
+	ret = abk_fido_hmac_sha256(shared, sizeof(shared), req->hmac_salt_enc,
+				   sizeof(req->hmac_salt_enc), tag);
+	if (ret)
+		goto out;
+	/* The comparison value comes from the host, so a constant-time
+	 * comparison buys nothing here.
+	 */
+	if (memcmp(tag, req->hmac_salt_auth, sizeof(tag))) {
+		pr_warn("abk_fido_key: hmac-secret saltAuth mismatch\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = abk_fido_aes256_cbc(shared, abk_fido_hmac_zero_iv,
+				  (u8 *)req->hmac_salt_enc,
+				  sizeof(req->hmac_salt_enc), false);
+	if (ret)
+		goto out;
+	memcpy(salt, req->hmac_salt_enc, sizeof(salt));
+
+	ret = abk_fido_hmac_sha256(cred->hmac_secret,
+				   sizeof(cred->hmac_secret),
+				   salt, ABK_FIDO_HMAC_SALT_LEN, outputs);
+	if (ret)
+		goto out;
+	ret = abk_fido_hmac_sha256(cred->hmac_secret,
+				   sizeof(cred->hmac_secret),
+				   salt + ABK_FIDO_HMAC_SALT_LEN,
+				   ABK_FIDO_HMAC_SALT_LEN, outputs + 32);
+	if (ret)
+		goto out;
+	ret = abk_fido_aes256_cbc(shared, abk_fido_hmac_zero_iv,
+				  outputs, sizeof(outputs), true);
+	if (!ret)
+		memcpy(output, outputs, sizeof(outputs));
+
+out:
+	memzero_explicit(shared, sizeof(shared));
+	memzero_explicit(salt, sizeof(salt));
+	memzero_explicit(outputs, sizeof(outputs));
+	memzero_explicit(tag, sizeof(tag));
+	return ret;
+}
+
 static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_assert_req *req,
 							   u8 *payload, size_t *payload_len)
 {
 	u8 slots[ABK_FIDO_MAX_CREDS];
+	u8 hmac_output[64];
 	unsigned int count;
 	int ret;
 
@@ -2763,13 +3483,27 @@ static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_as
 		goto out_unlock;
 	}
 
-	/* The user entity is what lets the client tell accounts apart, so send it
-	 * whenever the client did not name a single credential itself.
+	if (req->hmac_secret_requested) {
+		ret = abk_fido_hmac_get_secret_locked(slots[0], req,
+						      hmac_output);
+		if (ret)
+			goto out_unlock;
+	}
+
+	/* The user entity is what lets the client tell accounts apart: send it
+	 * for resident credentials even when the client named the credential
+	 * itself, because Windows Hello sign-in sends an allowList and still
+	 * needs the user handle to pick the account.
 	 */
 	ret = abk_fido_encode_assertion_locked(slots[0], req->rp_id,
 					      req->client_data_hash,
-					      req->allow_count == 0 || count > 1,
-					      count, payload, payload_len);
+					      req->allow_count == 0 ||
+					      count > 1 ||
+					      abk_fido_dev.store.creds[slots[0]].resident,
+					      count,
+					      req->hmac_secret_requested ?
+					      hmac_output : NULL,
+					      payload, payload_len);
 	if (ret)
 		goto out_unlock;
 
@@ -2843,7 +3577,8 @@ static noinline_for_stack int abk_fido_get_next_assertion_resp(u8 *payload,
 	}
 
 	ret = abk_fido_encode_assertion_locked(slot, rp_id, client_data_hash,
-					      true, 1, payload, payload_len);
+					      true, 1, NULL, payload,
+					      payload_len);
 	if (ret)
 		goto out_unlock;
 
@@ -2875,7 +3610,7 @@ static noinline_for_stack int abk_fido_get_info_resp(u8 *payload, size_t *payloa
 		goto out_unlock;
 
 	abk_cbor_writer_init(&w, payload, ABK_FIDO_MAX_CBOR);
-	abk_cbor_put_map(&w, 6);
+	abk_cbor_put_map(&w, 7);
 	abk_cbor_put_int(&w, 1);
 	/* CTAP2 only. CTAPHID_MSG has no handler and the INIT reply already sets
 	 * CAPABILITY_NMSG, so claiming "U2F_V2" here would only invite a client
@@ -2883,6 +3618,12 @@ static noinline_for_stack int abk_fido_get_info_resp(u8 *payload, size_t *payloa
 	 */
 	abk_cbor_put_array(&w, 1);
 	abk_cbor_put_text(&w, "FIDO_2_0");
+	abk_cbor_put_int(&w, 2);
+	/* The classic hmac-secret extension: Windows Hello needs it for
+	 * offline security-key unlock.
+	 */
+	abk_cbor_put_array(&w, 1);
+	abk_cbor_put_text(&w, "hmac-secret");
 	abk_cbor_put_int(&w, 3);
 	abk_cbor_put_bytes(&w, abk_fido_dev.store.aaguid, sizeof(abk_fido_dev.store.aaguid));
 	abk_cbor_put_int(&w, 4);
@@ -3511,13 +4252,9 @@ static int abk_fido_setup(struct usb_function *f,
 	case ((USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) << 8) |
 	     USB_REQ_GET_DESCRIPTOR:
 		if ((w_value >> 8) == HID_DT_HID) {
-			struct hid_descriptor desc = abk_fido_hid_desc;
-
-			desc.desc[0].bDescriptorType = HID_DT_REPORT;
-			desc.desc[0].wDescriptorLength =
-				cpu_to_le16(ABK_FIDO_REPORT_DESC_LEN);
-			value = min_t(unsigned int, w_length, desc.bLength);
-			memcpy(req->buf, &desc, value);
+			value = min_t(unsigned int, w_length,
+				      abk_fido_hid_desc.bLength);
+			memcpy(req->buf, &abk_fido_hid_desc, value);
 		} else if ((w_value >> 8) == HID_DT_REPORT) {
 			value = min_t(unsigned int, w_length, ABK_FIDO_REPORT_DESC_LEN);
 			memcpy(req->buf, abk_fido_report_desc, value);
@@ -3644,6 +4381,8 @@ static int abk_fido_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	abk_fido_dev.bound = true;
 	strscpy(abk_fido_dev.udc_name, cdev->gadget->name,
 		sizeof(abk_fido_dev.udc_name));
+	abk_fido_set_attach_state_locked("online_iface:%u",
+					 (unsigned int)abk_fido_intf_desc.bInterfaceNumber);
 	mutex_unlock(&abk_fido_dev.lock);
 
 	abk_fido_tx_kick(usb);
@@ -3715,8 +4454,8 @@ static int abk_fido_bind(struct usb_configuration *c, struct usb_function *f)
 	abk_fido_hs_out_desc.bEndpointAddress = abk_fido_fs_out_desc.bEndpointAddress;
 	abk_fido_ss_in_desc.bEndpointAddress = abk_fido_fs_in_desc.bEndpointAddress;
 	abk_fido_ss_out_desc.bEndpointAddress = abk_fido_fs_out_desc.bEndpointAddress;
-	abk_fido_hid_desc.desc[0].bDescriptorType = HID_DT_REPORT;
-	abk_fido_hid_desc.desc[0].wDescriptorLength =
+	abk_fido_hid_desc.bClassDescriptorType = HID_DT_REPORT;
+	abk_fido_hid_desc.wDescriptorLength =
 		cpu_to_le16(ABK_FIDO_REPORT_DESC_LEN);
 
 	ret = usb_assign_descriptors(f, abk_fido_fs_descs, abk_fido_hs_descs,
@@ -3738,6 +4477,8 @@ static int abk_fido_bind(struct usb_configuration *c, struct usb_function *f)
 	mutex_lock(&abk_fido_dev.lock);
 	abk_fido_dev.usb = usb;
 	strscpy(abk_fido_dev.hid_name, usb->misc_name, sizeof(abk_fido_dev.hid_name));
+	abk_fido_set_attach_state_locked("bound_iface:%u",
+					 (unsigned int)abk_fido_intf_desc.bInterfaceNumber);
 	mutex_unlock(&abk_fido_dev.lock);
 	return 0;
 }
@@ -3847,6 +4588,128 @@ static ssize_t hid_dev_show(struct kobject *kobj, struct kobj_attribute *attr, c
 static ssize_t ctap_dev_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "/dev/abk_fido_ctap\n");
+}
+
+static ssize_t attach_state_show(struct kobject *kobj,
+				 struct kobj_attribute *attr, char *buf)
+{
+	ssize_t ret;
+
+	mutex_lock(&abk_fido_dev.lock);
+	ret = sysfs_emit(buf, "%s\n", abk_fido_dev.attach_state);
+	mutex_unlock(&abk_fido_dev.lock);
+	return ret;
+}
+
+/* Fixed P-256 keypair, salts and expected outputs for the hmac-secret
+ * crypto self-test, generated by tests/gen_hmac_vectors.py and pinned in
+ * tests/hmac_vectors.json.
+ */
+static const u8 abk_fido_selftest_cred_priv[32] = {
+	0xda, 0x3f, 0x6e, 0xc6, 0xbd, 0x4a, 0x0e, 0x13, 0xee, 0x23, 0x23, 0x96,
+	0x64, 0xd7, 0x63, 0xfb, 0x6d, 0x63, 0x0e, 0xc1, 0x7c, 0x31, 0x65, 0x98,
+	0x93, 0x18, 0xb5, 0x5c, 0x1c, 0x48, 0x80, 0xed,
+};
+
+static const u8 abk_fido_selftest_platform_xy[64] = {
+	0x13, 0x01, 0xff, 0x53, 0x0e, 0x45, 0x9e, 0x01, 0x14, 0xc2, 0xa9, 0x7e,
+	0xf1, 0xbf, 0x9d, 0xaf, 0xdc, 0xed, 0x9e, 0x0a, 0x00, 0x7d, 0x36, 0x8e,
+	0x8e, 0x0b, 0x77, 0x45, 0xfd, 0xc5, 0x55, 0x6b, 0xf6, 0x3a, 0xbf, 0x2a,
+	0xea, 0x90, 0xa5, 0x97, 0xf5, 0x12, 0x1a, 0x35, 0x62, 0xa5, 0x5b, 0x0c,
+	0x03, 0x05, 0x5a, 0x1f, 0x3d, 0x47, 0x15, 0x21, 0x6b, 0x71, 0xa1, 0x16,
+	0x7f, 0x00, 0x87, 0x72,
+};
+
+static const u8 abk_fido_selftest_cred_secret[32] = {
+	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+	0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+	0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+};
+
+static const u8 abk_fido_selftest_salt_enc[64] = {
+	0x15, 0xc5, 0x99, 0x55, 0xf2, 0xde, 0xf5, 0x18, 0x33, 0x5e, 0xbd, 0xc4,
+	0xa9, 0x48, 0x5e, 0xf4, 0xaf, 0x01, 0x2e, 0x51, 0xe6, 0x3c, 0x35, 0x0d,
+	0xbb, 0xc7, 0x38, 0xe9, 0x37, 0x54, 0xf0, 0x83, 0xc8, 0x4b, 0x2e, 0xcc,
+	0x53, 0xbc, 0xcc, 0x94, 0x3a, 0x40, 0x00, 0xc7, 0x47, 0xc0, 0x2d, 0xd9,
+	0xb0, 0x8e, 0x36, 0xa5, 0xcc, 0xa1, 0xe3, 0x0e, 0x37, 0x67, 0x74, 0xf7,
+	0xd6, 0xdb, 0xdc, 0xdd,
+};
+
+static const u8 abk_fido_selftest_salt_auth[16] = {
+	0x3d, 0x3f, 0x28, 0x0d, 0x97, 0xc8, 0x9d, 0x7e, 0x45, 0x8e, 0x1a, 0x7f,
+	0xee, 0xad, 0x9d, 0x40,
+};
+
+static const u8 abk_fido_selftest_want_z[32] = {
+	0x13, 0x28, 0x34, 0x99, 0x58, 0x4a, 0xff, 0x72, 0x49, 0xb7, 0xbb, 0x44,
+	0xf2, 0x4f, 0xe9, 0xf9, 0x6c, 0x79, 0x18, 0x25, 0x72, 0x0a, 0xf4, 0x55,
+	0x72, 0x79, 0x46, 0xa1, 0xe2, 0x1d, 0xb3, 0x0d,
+};
+
+static const u8 abk_fido_selftest_want_output_enc[64] = {
+	0xb7, 0x48, 0xfa, 0x26, 0x8d, 0x0d, 0xb6, 0x7a, 0x05, 0x87, 0xe9, 0x8f,
+	0xfc, 0x50, 0x97, 0x96, 0xdb, 0xaa, 0xba, 0x30, 0x15, 0xdd, 0xe8, 0x1b,
+	0x9c, 0x4a, 0x06, 0x21, 0x36, 0xab, 0xc3, 0xea, 0xfd, 0x9b, 0x28, 0x53,
+	0xd1, 0x52, 0x85, 0x03, 0xda, 0xbd, 0x3d, 0x55, 0x46, 0xba, 0x75, 0xce,
+	0xcf, 0x7f, 0x15, 0xe7, 0x69, 0xa3, 0x95, 0x81, 0x1a, 0x4b, 0xc6, 0xab,
+	0x37, 0xd4, 0x1d, 0x72,
+};
+
+static ssize_t hmac_selftest_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	struct abk_fido_get_assert_req req = { 0 };
+	u8 shared[SHA256_DIGEST_SIZE];
+	u8 outputs[64];
+	u8 tag[ABK_FIDO_HMAC_SALT_AUTH_LEN];
+	char *p = buf;
+	int ret = 0;
+
+	memcpy(req.hmac_key_agreement, abk_fido_selftest_platform_xy, 64);
+	memcpy(req.hmac_salt_enc, abk_fido_selftest_salt_enc, 64);
+	memcpy(req.hmac_salt_auth, abk_fido_selftest_salt_auth, 16);
+
+	ret = abk_fido_ecdh_p256(abk_fido_selftest_cred_priv,
+				 req.hmac_key_agreement, shared);
+	p += sysfs_emit_at(buf, p - buf, "ecdh:%s\n", ret ? "FAIL" : "ok");
+	if (ret || memcmp(shared, abk_fido_selftest_want_z, 32)) {
+		p += sysfs_emit_at(buf, p - buf, "z=0x%*phN\n", 32, shared);
+		return p - buf;
+	}
+
+	ret = abk_fido_hmac_sha256(shared, 32, req.hmac_salt_enc, 64, tag);
+	p += sysfs_emit_at(buf, p - buf, "salt_auth:%s\n", ret ? "FAIL" : "ok");
+	if (ret || memcmp(tag, req.hmac_salt_auth, 16))
+		return p - buf;
+
+	ret = abk_fido_aes256_cbc(shared, abk_fido_hmac_zero_iv,
+				  (u8 *)req.hmac_salt_enc, 64, false);
+	p += sysfs_emit_at(buf, p - buf, "salt_dec:%s\n", ret ? "FAIL" : "ok");
+	if (ret)
+		return p - buf;
+
+	ret = abk_fido_hmac_sha256(abk_fido_selftest_cred_secret, 32,
+				   req.hmac_salt_enc, 32, outputs);
+	if (!ret)
+		ret = abk_fido_hmac_sha256(abk_fido_selftest_cred_secret, 32,
+					   req.hmac_salt_enc + 32, 32,
+					   outputs + 32);
+	p += sysfs_emit_at(buf, p - buf, "outputs:%s\n", ret ? "FAIL" : "ok");
+	if (ret)
+		return p - buf;
+
+	ret = abk_fido_aes256_cbc(shared, abk_fido_hmac_zero_iv,
+				  outputs, 64, true);
+	p += sysfs_emit_at(buf, p - buf, "output_enc:%s\n", ret ? "FAIL" : "ok");
+	if (ret || memcmp(outputs, abk_fido_selftest_want_output_enc, 64)) {
+		p += sysfs_emit_at(buf, p - buf, "enc=0x%*phN\n", 64, outputs);
+		return p - buf;
+	}
+
+	memzero_explicit(shared, sizeof(shared));
+	memzero_explicit(outputs, sizeof(outputs));
+	p += sysfs_emit_at(buf, p - buf, "hmac-secret:ok\n");
+	return p - buf;
 }
 
 static ssize_t credential_count_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
@@ -4044,6 +4907,8 @@ static struct kobj_attribute bound_attr = __ATTR_RO(bound);
 static struct kobj_attribute udc_attr = __ATTR_RO(udc);
 static struct kobj_attribute hid_dev_attr = __ATTR_RO(hid_dev);
 static struct kobj_attribute ctap_dev_attr = __ATTR_RO(ctap_dev);
+static struct kobj_attribute attach_state_attr = __ATTR_RO(attach_state);
+static struct kobj_attribute hmac_selftest_attr = __ATTR_RO(hmac_selftest);
 static struct kobj_attribute credential_count_attr = __ATTR_RO(credential_count);
 static struct kobj_attribute last_error_attr = __ATTR_RO(last_error);
 static struct kobj_attribute last_trace_attr = __ATTR_RO(last_trace);
@@ -4072,6 +4937,8 @@ static struct attribute *abk_fido_attrs[] = {
 	&udc_attr.attr,
 	&hid_dev_attr.attr,
 	&ctap_dev_attr.attr,
+	&attach_state_attr.attr,
+	&hmac_selftest_attr.attr,
 	&credential_count_attr.attr,
 	&last_error_attr.attr,
 	&last_trace_attr.attr,
@@ -4146,7 +5013,7 @@ static int abk_fido_control_run_command(const char *command, void *data)
 static const struct abk_control_ops abk_fido_control_ops = {
 	.id = "abk_fido_key",
 	.name = "ABK FIDO Key",
-	.version = "0.2.0",
+	.version = "0.3.0",
 	.description = "Kernel-side FIDO2 security key with metadata-backed persistence.",
 	.module_dir = "drivers/abk_fido_key",
 	.web_root = "",
@@ -4178,25 +5045,45 @@ int abk_fido_key_prepare_config(struct usb_composite_dev *cdev,
 	struct usb_function *f;
 	struct usb_function *iter;
 
-	if (!IS_ENABLED(CONFIG_ABK_FIDO_KEY_GADGET_AUTO_ATTACH))
+	if (!IS_ENABLED(CONFIG_ABK_FIDO_KEY_GADGET_AUTO_ATTACH)) {
+		mutex_lock(&abk_fido_dev.lock);
+		abk_fido_set_attach_state_locked("auto_attach_disabled");
+		mutex_unlock(&abk_fido_dev.lock);
 		return 0;
+	}
 
 	list_for_each_entry(iter, func_list, list) {
-		if (iter->name && !strcmp(iter->name, "abk_fido"))
+		if (iter->name && !strcmp(iter->name, "abk_fido")) {
+			mutex_lock(&abk_fido_dev.lock);
+			abk_fido_set_attach_state_locked("already_attached");
+			mutex_unlock(&abk_fido_dev.lock);
 			return 0;
+		}
 	}
 
 	fi = usb_get_function_instance("abk_fido");
-	if (IS_ERR(fi))
+	if (IS_ERR(fi)) {
+		mutex_lock(&abk_fido_dev.lock);
+		abk_fido_set_attach_state_locked("get_instance_failed:%ld",
+						 PTR_ERR(fi));
+		mutex_unlock(&abk_fido_dev.lock);
 		return PTR_ERR(fi);
+	}
 
 	f = usb_get_function(fi);
 	if (IS_ERR(f)) {
+		mutex_lock(&abk_fido_dev.lock);
+		abk_fido_set_attach_state_locked("get_function_failed:%ld",
+						 PTR_ERR(f));
+		mutex_unlock(&abk_fido_dev.lock);
 		usb_put_function_instance(fi);
 		return PTR_ERR(f);
 	}
 
 	list_add_tail(&f->list, func_list);
+	mutex_lock(&abk_fido_dev.lock);
+	abk_fido_set_attach_state_locked("attached");
+	mutex_unlock(&abk_fido_dev.lock);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(abk_fido_key_prepare_config);
@@ -4216,6 +5103,10 @@ void abk_fido_key_release_config(struct list_head *func_list)
 		usb_put_function(f);
 		usb_put_function_instance(fi);
 	}
+
+	mutex_lock(&abk_fido_dev.lock);
+	abk_fido_set_attach_state_locked("released");
+	mutex_unlock(&abk_fido_dev.lock);
 }
 EXPORT_SYMBOL_GPL(abk_fido_key_release_config);
 

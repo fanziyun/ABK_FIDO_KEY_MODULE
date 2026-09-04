@@ -6,7 +6,7 @@ Android phone build into a composite USB FIDO2 security key.
 `abk_fido_key_module` 是一个 ABK 自定义外部内核模块，用来把 Android
 手机侧内核扩展成一个复合 USB FIDO2 Security Key。
 
-Current version / 当前版本: `0.2.0`
+Current version / 当前版本: `0.3.0`
 
 Supported kernel lines / 支持的内核线: **5.15** (`android13-5.15-lts`) and
 **6.1** (`android14-6.1-lts`).
@@ -143,7 +143,16 @@ assembled.
 - Exposes a misc debug node as `/dev/hidgX` where `X` is usually `0` to `3`.
 - Exposes read-only status nodes under `/sys/kernel/abk_fido_key/`:
   `enabled`, `bound`, `udc`, `hid_dev`, `credential_count`, `last_error`,
-  `last_trace`, `store_generation`.
+  `last_trace`, `store_generation`, `attach_state`, `hmac_selftest`.
+- `attach_state` traces the gadget auto-attach pipeline
+  (`not_configured` → `attached` → `bound_iface:N` → `online_iface:N`) and
+  records the reason when a step fails (`auto_attach_disabled`,
+  `get_instance_failed:<err>`), which is the first thing to read when a host
+  cannot enumerate the key.
+- `hmac_selftest` runs the hmac-secret crypto (ECDH P-256 → SHA-256 →
+  AES-256-CBC / HMAC-SHA-256) on fixed golden vectors and prints `ok` per
+  step, so the Windows Hello offline-unlock maths can be verified on the
+  phone without Windows.
 - Exposes a write-only reload node under `/sys/kernel/abk_fido_key/reload_store`
   so userspace can force a reload from the metadata blob.
 - Exposes a write-only restore trigger under
@@ -246,6 +255,10 @@ After a successful build and boot, check:
 - `CONFIG_ABK_FIDO_KEY=y` and related symbols are enabled
 - `/sys/kernel/abk_fido_key/hid_dev` reports a `hidgX` device name
 - `/sys/kernel/abk_fido_key/bound` becomes `1` after the gadget is bound
+- `/sys/kernel/abk_fido_key/attach_state` ends at `online_iface:N` after a
+  USB plug; anything else names the failing attach step
+- `/sys/kernel/abk_fido_key/hmac_selftest` prints `hmac-secret:ok` (verifies
+  the Windows Hello offline-unlock crypto on the phone)
 - `/dev/hidgX` exists for packet-level debugging
 - after a credential change, `/metadata/abk_fido_store.bin` exists
 - writing `1` to `/sys/kernel/abk_fido_key/restore_metadata` increments
@@ -318,13 +331,31 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
 
 ## Current Limits / 当前边界
 
-- Windows Hello is untested. The device selection ceremony is handled — Windows
-  sends a makeCredential with `rp.id` = `user.name` = `"SelectDevice"` (built in
+- Windows Hello is supported on the USB path, including offline security-key
+  unlock. The device selection ceremony is handled — Windows sends a
+  makeCredential with `rp.id` = `user.name` = `"SelectDevice"` (built in
   `_SelectDevice`, `webauthnctap.cpp`) and the driver answers it like Chromium's
   `.dummy` request: collect the local approval, return a throwaway
-  makeCredential response, create nothing. What is *not* verified is the rest of
-  the Windows path, including how it reacts to a key that advertises `uv` with
-  no `clientPin` and refuses silent `getAssertion`.
+  makeCredential response, create nothing. Registration answers the
+  `hmac-secret` extension with `true` and mints a 32-byte per-credential
+  secret; lock-screen sign-in answers `hmacGetSecret` with the classic CTAP2
+  §6.6 scheme (SHA-256(ECDH x), AES-256-CBC, HMAC-SHA-256). The exact test
+  procedure and the diagnostic playbook are in
+  [`docs/windows-hello.md`](docs/windows-hello.md).
+  Windows Hello 支持 USB 路径，含离线安全密钥解锁。注册时驱动响应
+  `hmac-secret` 扩展并生成每个凭据的 32 字节密钥；锁屏登录按经典
+  CTAP2 §6.6 方案（SHA-256(ECDH x)、AES-256-CBC、HMAC-SHA-256）应答
+  `hmacGetSecret`。测试步骤与排障清单见
+  [`docs/windows-hello.md`](docs/windows-hello.md)。
+- The persisted store is now version 2: each credential carries its
+  hmac-secret. Version 1 blobs are still loaded (kernel and companion app) and
+  are upgraded to v2 on the next write; credentials migrated from v1 have no
+  secret, so Windows Hello treats them as online-only until they are
+  re-registered. A 0.2.0 companion app cannot parse the new blob — update the
+  app together with the kernel.
+  持久化存储升级为版本 2（每凭据携带 hmac-secret）；版本 1 的旧 blob 仍可
+  读取并在下次写入时升级。迁移过来的旧凭据没有 hmac-secret，离线解锁前需
+  重新注册。0.2.0 版配套 App 无法解析新 blob，请同步更新。
 - The LAN relay needs a virtual HID device on the desktop, and creating one is
   privileged on both platforms: on Linux the agent uses `/dev/uhid` and must run
   as root; on Windows it needs the `abkfidovhid` driver from

@@ -24,6 +24,13 @@ abk_fido_patch_usb_gadget() {
 
   abk_require_file "$configfs"
   python3 "$MODULE_DIR/scripts/patch_configfs_for_abk_fido.py" "$configfs"
+  # The injection is the only thing that puts the FIDO interface on the wire:
+  # a tree that silently missed it produces a phone that never enumerates the
+  # key on Windows, so fail the build instead of shipping that.
+  grep -q "abk_fido_key_prepare_config" "$configfs" \
+    || abk_die "ABK FIDO configfs patch missing the prepare_config injection"
+  grep -q "abk_fido_key_release_config" "$configfs" \
+    || abk_die "ABK FIDO configfs patch missing the release_config injection"
 }
 
 abk_fido_patch_kernelsu_sepolicy() {
@@ -52,4 +59,12 @@ abk_fido_enable_config() {
   abk_enable_config CONFIG_ABK_FIDO_KEY_GADGET_AUTO_ATTACH
   abk_enable_config CONFIG_ABK_FIDO_KEY_PERSIST_METADATA
   abk_enable_config CONFIG_ABK_FIDO_KEY_PERSIST_ADB_DATA
+
+  # Without AUTO_ATTACH the gadget never adds the FIDO HID interface and the
+  # key stays invisible to every host: fail the build instead of shipping a
+  # phone that cannot enumerate the key.
+  grep -q "^CONFIG_ABK_FIDO_KEY=y\$" "$DEFCONFIG" \
+    || abk_die "CONFIG_ABK_FIDO_KEY missing from $DEFCONFIG"
+  grep -q "^CONFIG_ABK_FIDO_KEY_GADGET_AUTO_ATTACH=y\$" "$DEFCONFIG" \
+    || abk_die "CONFIG_ABK_FIDO_KEY_GADGET_AUTO_ATTACH missing from $DEFCONFIG"
 }

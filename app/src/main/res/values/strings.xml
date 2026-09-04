@@ -1,5 +1,6 @@
 <resources>
     <string name="app_name">ABK FIDO Companion</string>
+    <string name="diagnostics_title">ABK FIDO Diagnostics</string>
     <string name="status_syncing">Syncing FIDO store with the active persistence backend…</string>
     <string name="status_root_missing">Root is unavailable. FIDO persistence sync was skipped.</string>
     <string name="status_success_prefix">Sync finished: </string>

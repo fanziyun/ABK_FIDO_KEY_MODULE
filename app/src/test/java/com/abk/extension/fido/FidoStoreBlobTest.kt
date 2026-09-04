@@ -26,7 +26,21 @@ class FidoStoreBlobTest {
             userDisplay = display,
             privKey = ByteArray(32) { (0x40 + it).toByte() },
             pubKey = ByteArray(64) { (0x80 + it).toByte() },
+            hmacSecret = ByteArray(32) { (0xa0 + it).toByte() },
         )
+
+    private fun writeIntLe(bytes: ByteArray, offset: Int, value: Int) {
+        bytes[offset] = (value and 0xff).toByte()
+        bytes[offset + 1] = ((value ushr 8) and 0xff).toByte()
+        bytes[offset + 2] = ((value ushr 16) and 0xff).toByte()
+        bytes[offset + 3] = ((value ushr 24) and 0xff).toByte()
+    }
+
+    private fun readIntLe(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xff) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xff) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xff) shl 24)
 
     @Test
     fun emptyStoreHasTheSizeTheDriverReads() {
@@ -64,6 +78,7 @@ class FidoStoreBlobTest {
         assertEquals(original.credId.toList(), read.credId.toList())
         assertEquals(original.privKey.toList(), read.privKey.toList())
         assertEquals(original.pubKey.toList(), read.pubKey.toList())
+        assertEquals(original.hmacSecret.toList(), read.hmacSecret.toList())
     }
 
     @Test
@@ -117,5 +132,39 @@ class FidoStoreBlobTest {
         bytes[FidoStoreBlob.HEADER_SIZE + 100] = 'x'.code.toByte()
         assertNull(FidoStoreBlob.parse(bytes))
         assertNotNull(FidoStoreBlob.parse(bytes, ignoreCrc = true))
+    }
+
+    @Test
+    fun aVersionOneBlobIsUpgradedWithZeroedSecrets() {
+        // Hand-built v1 layout: 84-byte header + 32 * 452-byte slots, one
+        // credential in slot 0, no hmac-secret field.
+        val v1 = ByteArray(FidoStoreBlob.SIZE_V1)
+        v1[0] = 0x46; v1[1] = 0x46; v1[2] = 0x42; v1[3] = 0x41 // 0x41424646 LE
+        writeIntLe(v1, 4, 1) // version 1
+        val slot0 = FidoStoreBlob.HEADER_SIZE
+        v1[slot0] = 1 // in_use
+        v1[slot0 + 1] = 1 // resident
+        v1[slot0 + 2] = 4
+        "v1.example.com".toByteArray().copyInto(v1, slot0 + 100)
+        val crc = CRC32().apply { update(v1, 12, v1.size - 12) }.value.toInt()
+        writeIntLe(v1, 8, crc)
+
+        val parsed = FidoStoreBlob.parse(v1)!!
+        val cred = parsed.credentialAt(0)!!
+        assertEquals("v1.example.com", cred.rpId)
+        assertTrue(cred.hmacSecret.all { it == 0.toByte() })
+
+        // Resealing writes the v2 layout the driver expects.
+        val resealed = parsed.toBytes()
+        assertEquals(FidoStoreBlob.SIZE, resealed.size)
+        assertEquals(2, readIntLe(resealed, 4))
+        assertNotNull(FidoStoreBlob.parse(resealed))
+    }
+
+    @Test
+    fun aWrongStoreVersionIsRefused() {
+        val bytes = FidoStoreBlob.empty().toBytes()
+        writeIntLe(bytes, 4, 3)
+        assertNull(FidoStoreBlob.parse(bytes))
     }
 }

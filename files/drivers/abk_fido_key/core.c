@@ -2014,13 +2014,18 @@ static int abk_fido_maybe_persist_locked(void)
 
 defer_persist:
 	kfree(disk);
-	abk_fido_dev.store_dirty = false;
+	/* Keep the dirty flag: the blob was NOT written, so the next
+	 * credential-changing operation retries instead of silently dropping
+	 * the store on the floor (a single transient -EACCES/-ENOMEM must not
+	 * turn into a lost key store on reboot).
+	 */
 	abk_fido_dev.store_generation++;
 	if (reason[0]) {
 		snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
 			 "%s", reason);
-		abk_fido_set_last_trace_locked("persist deferred: %s", reason);
-		pr_info("abk_fido_key: persist deferred: %s\n", reason);
+		abk_fido_set_last_trace_locked("persist deferred (will retry): %s",
+					      reason);
+		pr_info("abk_fido_key: persist deferred (will retry): %s\n", reason);
 	} else {
 		abk_fido_set_last_trace_locked("persist deferred: no store path available");
 		pr_info("abk_fido_key: persist deferred: no store path available\n");
@@ -3468,13 +3473,13 @@ static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_as
 		ret = ABK_FIDO_ERR_PIN_NOT_SET;
 		goto out_unlock;
 	}
-	if (req->up_disabled) {
-		/* Silent request. Browsers use these to probe which credentials
-		 * exist, but an assertion is a signature made with a stored
-		 * private key, and this key never produces one without a local
-		 * approval. Refuse before touching the store: no prompt, so a
-		 * host scanning credential ids cannot spam the phone, and no
-		 * cooldown either.
+
+	count = abk_fido_collect_rp_credentials_locked(req, slots,
+						      ARRAY_SIZE(slots));
+	if (req->up_disabled && !count) {
+		/* Silent request with nothing to answer. Browsers use these to
+		 * probe which credentials exist; refusing here costs nothing
+		 * and avoids background prompt spam: no prompt, no cooldown.
 		 */
 		abk_fido_set_last_trace_locked(
 			"getAssertion silent refused rp=%s allow=%u",
@@ -3484,18 +3489,31 @@ static noinline_for_stack int abk_fido_get_assertion_resp(struct abk_fido_get_as
 		ret = ABK_FIDO_ERR_UP_REQUIRED;
 		goto out_unlock;
 	}
+	if (!count) {
+		ret = -ENOENT;
+		goto out_unlock;
+	}
+
+	if (req->up_disabled) {
+		/* A silent probe that DOES match: this is passkey discovery.
+		 * Refusing it would make the client conclude the key holds
+		 * nothing and offer to register a brand-new credential instead
+		 * of reusing this one, so it gets the normal local approval
+		 * prompt. The signature is still never produced without the
+		 * user in front of the phone; the 3 s grant window covers the
+		 * follow-up request the client sends right after.
+		 */
+		abk_fido_set_last_trace_locked(
+			"getAssertion silent probe prompted rp=%s allow=%u",
+			req->rp_id, req->allow_count);
+		pr_info("abk_fido_key: getAssertion silent probe prompted rp=%s allow=%u\n",
+			req->rp_id, req->allow_count);
+	}
 
 	ret = abk_fido_auth_begin_locked(ABK_FIDO_CTAP_GET_ASSERTION,
 					 req->rp_id, req->uv, false);
 	if (ret)
 		goto out_unlock;
-
-	count = abk_fido_collect_rp_credentials_locked(req, slots,
-						      ARRAY_SIZE(slots));
-	if (!count) {
-		ret = -ENOENT;
-		goto out_unlock;
-	}
 
 	if (req->hmac_secret_requested) {
 		ret = abk_fido_hmac_get_secret_locked(slots[0], req,

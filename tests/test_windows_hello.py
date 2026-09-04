@@ -59,10 +59,19 @@ class WindowsHelloShapeTest(unittest.TestCase):
         )
 
     def test_silent_getassertion_is_refused(self) -> None:
-        # Windows probes credential existence with up=0; answering would mint
-        # a signature with nobody in front of the phone.
+        # Browsers probe credential existence with up=0. With no matching
+        # credential the driver refuses without prompting, so background
+        # probes cannot spam the phone.
         self._assert_text(
             "getAssertion silent refused", "silent getAssertion refusal missing"
+        )
+
+    def test_silent_probe_with_a_match_gets_the_approval_prompt(self) -> None:
+        # Refusing a probe that DOES match would make clients offer to
+        # register a new credential instead of reusing the existing one.
+        self._assert_text(
+            "getAssertion silent probe prompted",
+            "silent probe with match no longer prompts for approval",
         )
 
     def test_assertion_carries_the_user_object_for_resident_keys(self) -> None:

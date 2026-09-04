@@ -192,14 +192,20 @@ assembled.
   `1` and refuses a `0`). One approval covers further requests for 3 s; a
   refused, cancelled or unanswered prompt instead blocks every request for 3 s.
   `/sys/kernel/abk_fido_key/auth_cooldown` reports both windows.
-- Silent requests are refused. A `getAssertion` with the `up` option cleared —
-  what browsers use to probe which credential ids exist — would hand out a
-  signature with no one in front of the phone, so it gets
-  `CTAP2_ERR_UP_REQUIRED` without a prompt and without arming the cooldown.
-  `makeCredential` with `up` cleared gets `CTAP2_ERR_INVALID_OPTION`. Exclusion
-  is therefore handled the direct way: up to 32 `excludeList` / `allowList`
-  entries are parsed per request (`maxCredentialCountInList` advertises 16 to
-  stay inside `maxMsgSize`), and a match answers `CTAP2_ERR_CREDENTIAL_EXCLUDED`.
+- Silent requests with nothing to answer are refused. A `getAssertion` with
+  the `up` option cleared is the probe browsers use to discover which
+  credential ids exist: when no credential matches the request it gets
+  `CTAP2_ERR_UP_REQUIRED` without a prompt and without arming the cooldown,
+  so background probing cannot spam the phone. When a credential **does**
+  match, the probe gets the normal local approval prompt instead — refusing
+  it would make the client conclude the key holds nothing and offer to
+  register a brand-new credential every time instead of reusing the existing
+  one. A signature is still never produced without the user in front of the
+  phone. `makeCredential` with `up` cleared gets
+  `CTAP2_ERR_INVALID_OPTION`. Exclusion is therefore handled the direct way:
+  up to 32 `excludeList` / `allowList` entries are parsed per request
+  (`maxCredentialCountInList` advertises 16 to stay inside `maxMsgSize`), and
+  a match answers `CTAP2_ERR_CREDENTIAL_EXCLUDED`.
 - Persists the kernel-side FIDO store blob at `/metadata/abk_fido_store.bin`.
 - During build injection, the module patches KernelSU SELinux policy setup so
   the `kernel` domain can access that metadata blob without switching SELinux

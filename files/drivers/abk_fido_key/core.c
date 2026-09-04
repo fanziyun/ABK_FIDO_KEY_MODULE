@@ -118,6 +118,8 @@
 #define ABK_FIDO_HID_CBOR			0x10
 #define ABK_FIDO_HID_CANCEL			0x11
 #define ABK_FIDO_HID_ERROR			0x3f
+#define ABK_FIDO_HID_KEEPALIVE			0x3b
+#define ABK_FIDO_KEEPALIVE_STATUS_PROCESSING	0x01
 
 #define ABK_FIDO_HID_ERR_INVALID_CMD		0x01
 #define ABK_FIDO_HID_ERR_INVALID_PAR		0x02
@@ -130,7 +132,6 @@
 #define ABK_FIDO_HID_ERR_OTHER			0x7f
 
 #define ABK_FIDO_CTAP_SUCCESS			0x00
-#define ABK_FIDO_CTAP_KEEPALIVE		0x3D
 #define ABK_FIDO_CTAP_ERR_INVALID_COMMAND	0x01
 #define ABK_FIDO_CTAP_ERR_INVALID_PARAMETER	0x02
 #define ABK_FIDO_CTAP_ERR_INVALID_LENGTH	0x03
@@ -601,6 +602,8 @@ static void abk_fido_set_last_trace_locked(const char *fmt, ...);
 static void abk_fido_send_cbor_result(struct abk_fido_usb *usb, u32 cid,
 				      u8 status, const u8 *payload,
 				      size_t payload_len);
+static void abk_fido_send_hid_message(struct abk_fido_usb *usb, u32 cid,
+				      u8 cmd, const u8 *payload, size_t len);
 static int abk_fido_store_from_disk_into(struct abk_fido_store_disk *disk,
 					 struct abk_fido_store *store,
 					 char *reason, size_t reason_len);
@@ -2256,14 +2259,18 @@ static void abk_fido_auth_start_cooldown_locked(void)
 
 /* Keepalive pacer. Windows webauthn's HID read gives up after ~2 s of
  * silence, so while the auth decision is pending on the phone the driver
- * sends CTAP2_STATUS_KEEPALIVE every 500 ms - exactly what hardware
- * security keys do while waiting for a touch. Without this, any approval
- * that takes longer than a couple of seconds is answered into a dead
- * client, which is why "approve fast works, approve slow never returns".
+ * sends a CTAPHID_KEEPALIVE (0x3b, wire 0xbb) frame carrying a one-byte
+ * PROCESSING status every 500 ms - exactly what hardware security keys
+ * do while waiting for a touch. This must be a raw HID frame, NOT a
+ * CBOR result: a CTAPHID_CBOR frame with a status byte is parsed by the
+ * host as the final response to the pending command, which makes Windows
+ * abort the transaction ("unable to get your security key") while the
+ * fingerprint prompt is still up on the phone.
  */
 static void abk_fido_auth_keepalive_worker(struct work_struct *work)
 {
 	struct abk_fido_usb *usb;
+	u8 keepalive_status = ABK_FIDO_KEEPALIVE_STATUS_PROCESSING;
 	u32 cid;
 	bool pending;
 
@@ -2276,7 +2283,8 @@ static void abk_fido_auth_keepalive_worker(struct work_struct *work)
 	if (!pending || !usb)
 		return;
 
-	abk_fido_send_cbor_result(usb, cid, ABK_FIDO_CTAP_KEEPALIVE, NULL, 0);
+	abk_fido_send_hid_message(usb, cid, ABK_FIDO_HID_KEEPALIVE,
+				  &keepalive_status, 1);
 	mod_delayed_work(system_wq, &abk_fido_dev.auth_keepalive_work,
 			 msecs_to_jiffies(500));
 }

@@ -114,6 +114,19 @@ class WindowsHelloShapeTest(unittest.TestCase):
             "AUTO_ATTACH-off state is not recorded",
         )
 
+    def test_stuck_in_transfer_is_unwedged_on_new_commands(self) -> None:
+        # A host that times out stops polling the IN endpoint; the queued
+        # request then never completes and every later response would queue
+        # behind it (Windows shows "touch your key" forever). A fresh
+        # command dequeues the stuck transfer.
+        self._assert_text(
+            "dequeue of stuck IN request",
+            "stuck IN transfer is no longer dequeued on new commands",
+        )
+        self._assert_text(
+            "hid_state_attr", "hid_state diagnostic node missing"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4798,58 +4798,70 @@ static const u8 abk_fido_selftest_want_output_enc[64] = {
 static ssize_t hmac_selftest_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
-	struct abk_fido_get_assert_req req = { 0 };
+	struct abk_fido_get_assert_req *req;
 	u8 shared[SHA256_DIGEST_SIZE];
 	u8 outputs[64];
 	u8 tag[ABK_FIDO_HMAC_SALT_AUTH_LEN];
 	char *p = buf;
+	ssize_t out_len;
 	int ret = 0;
 
-	memcpy(req.hmac_key_agreement, abk_fido_selftest_platform_xy, 64);
-	memcpy(req.hmac_salt_enc, abk_fido_selftest_salt_enc, 64);
-	memcpy(req.hmac_salt_auth, abk_fido_selftest_salt_auth, 16);
+	/* The parsed request shape carries a 32-entry allowlist (~1.5 kB):
+	 * heap-allocate it instead of blowing the sysfs attribute's stack
+	 * frame past the compiler's 2 kB warning limit.
+	 */
+	req = kvzalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
+	memcpy(req->hmac_key_agreement, abk_fido_selftest_platform_xy, 64);
+	memcpy(req->hmac_salt_enc, abk_fido_selftest_salt_enc, 64);
+	memcpy(req->hmac_salt_auth, abk_fido_selftest_salt_auth, 16);
 
 	ret = abk_fido_ecdh_p256(abk_fido_selftest_cred_priv,
-				 req.hmac_key_agreement, shared);
+				 req->hmac_key_agreement, shared);
 	p += sysfs_emit_at(buf, p - buf, "ecdh:%s\n", ret ? "FAIL" : "ok");
 	if (ret || memcmp(shared, abk_fido_selftest_want_z, 32)) {
 		p += sysfs_emit_at(buf, p - buf, "z=0x%*phN\n", 32, shared);
-		return p - buf;
+		goto out;
 	}
 
-	ret = abk_fido_hmac_sha256(shared, 32, req.hmac_salt_enc, 64, tag);
+	ret = abk_fido_hmac_sha256(shared, 32, req->hmac_salt_enc, 64, tag);
 	p += sysfs_emit_at(buf, p - buf, "salt_auth:%s\n", ret ? "FAIL" : "ok");
-	if (ret || memcmp(tag, req.hmac_salt_auth, 16))
-		return p - buf;
+	if (ret || memcmp(tag, req->hmac_salt_auth, 16))
+		goto out;
 
 	ret = abk_fido_aes256_cbc(shared, abk_fido_hmac_zero_iv,
-				  (u8 *)req.hmac_salt_enc, 64, false);
+				  (u8 *)req->hmac_salt_enc, 64, false);
 	p += sysfs_emit_at(buf, p - buf, "salt_dec:%s\n", ret ? "FAIL" : "ok");
 	if (ret)
-		return p - buf;
+		goto out;
 
 	ret = abk_fido_hmac_sha256(abk_fido_selftest_cred_secret, 32,
-				   req.hmac_salt_enc, 32, outputs);
+				   req->hmac_salt_enc, 32, outputs);
 	if (!ret)
 		ret = abk_fido_hmac_sha256(abk_fido_selftest_cred_secret, 32,
-					   req.hmac_salt_enc + 32, 32,
+					   req->hmac_salt_enc + 32, 32,
 					   outputs + 32);
 	p += sysfs_emit_at(buf, p - buf, "outputs:%s\n", ret ? "FAIL" : "ok");
 	if (ret)
-		return p - buf;
+		goto out;
 
 	ret = abk_fido_aes256_cbc(shared, abk_fido_hmac_zero_iv,
 				  outputs, 64, true);
 	p += sysfs_emit_at(buf, p - buf, "output_enc:%s\n", ret ? "FAIL" : "ok");
 	if (ret || memcmp(outputs, abk_fido_selftest_want_output_enc, 64)) {
 		p += sysfs_emit_at(buf, p - buf, "enc=0x%*phN\n", 64, outputs);
-		return p - buf;
+		goto out;
 	}
 
+	p += sysfs_emit_at(buf, p - buf, "hmac-secret:ok\n");
+out:
+	out_len = p - buf;
+	kvfree(req);
 	memzero_explicit(shared, sizeof(shared));
 	memzero_explicit(outputs, sizeof(outputs));
-	p += sysfs_emit_at(buf, p - buf, "hmac-secret:ok\n");
-	return p - buf;
+	return out_len;
 }
 
 static ssize_t credential_count_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)

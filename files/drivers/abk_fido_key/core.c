@@ -1004,28 +1004,33 @@ static ssize_t abk_fido_store_blob_write(struct file *filp, struct kobject *kobj
 			      sizeof(struct abk_fido_store_disk_v1);
 
 		disk = (struct abk_fido_store_disk *)abk_fido_dev.store_blob_staging;
-		if (legacy)
-			ret = abk_fido_store_from_disk_v1_into(
-				(struct abk_fido_store_disk_v1 *)disk,
-				&abk_fido_dev.store, reason, sizeof(reason));
-		else
+		if (legacy) {
+			/* A pre-0.3.0 companion writes the v1 layout and, on
+			 * top of that, has already failed to parse the v2 blob
+			 * it read back, so honoring the write would silently
+			 * wipe the store and regenerate the aaguid - which
+			 * makes Windows treat the key as a brand-new device.
+			 * Refuse the userspace v1 write; only the on-disk
+			 * loader still upgrades real v1 files.
+			 */
+			snprintf(abk_fido_dev.last_error,
+				 sizeof(abk_fido_dev.last_error),
+				 "v1 blob refused from userspace (update the companion app)");
+			abk_fido_set_last_trace_locked(
+				"v1 blob refused from userspace (update the companion app)");
+			pr_warn("abk_fido_key: v1 blob refused from userspace (update the companion app)\n");
+			ret = -EINVAL;
+		} else {
 			ret = abk_fido_store_from_disk_into(
 				disk, &abk_fido_dev.store, reason,
 				sizeof(reason));
+		}
 		if (!ret) {
 			abk_fido_dev.store_loaded = true;
 			abk_fido_dev.store_generation++;
-			if (legacy) {
-				/* Next persist rewrites the blob as v2. */
-				abk_fido_dev.store_dirty = true;
-				abk_fido_finalize_restored_store_locked(
-					"store blob restored from userspace (legacy v1, will persist as v2)");
-			} else {
-				abk_fido_finalize_restored_store_locked(
-					"store blob restored from userspace");
-			}
-			pr_info("abk_fido_key: store blob restored from userspace%s\n",
-				legacy ? " (legacy v1)" : "");
+			abk_fido_finalize_restored_store_locked(
+				"store blob restored from userspace");
+			pr_info("abk_fido_key: store blob restored from userspace\n");
 		} else {
 			snprintf(abk_fido_dev.last_error, sizeof(abk_fido_dev.last_error),
 				 "%s", reason[0] ? reason :

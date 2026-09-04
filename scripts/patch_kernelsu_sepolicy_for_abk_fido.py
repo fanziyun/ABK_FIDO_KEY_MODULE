@@ -17,8 +17,12 @@ NEEDLE = """    // our ksud triggered by init
 BLOCK = """    // our ksud triggered by init
     ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
 
-    /* ABK FIDO: allow kernel domain access to the persisted metadata store. */
+    /* ABK FIDO: allow kernel domain access to the persisted metadata store.
+     * create is needed for the first O_CREAT of the blob (write alone only
+     * covers an already existing file).
+     */
     ksu_allow(db, "kernel", "metadata_file", "dir", "search");
+    ksu_allow(db, "kernel", "metadata_file", "file", "create");
     ksu_allow(db, "kernel", "metadata_file", "file", "open");
     ksu_allow(db, "kernel", "metadata_file", "file", "read");
     ksu_allow(db, "kernel", "metadata_file", "file", "write");

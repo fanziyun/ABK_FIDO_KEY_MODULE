@@ -2,7 +2,7 @@ package com.abk.extension.fido
 
 import com.topjohnwu.superuser.Shell
 
-object RootShell {
+internal object RootShell {
     data class CommandResult(
         val exitCode: Int,
         val stdout: String,

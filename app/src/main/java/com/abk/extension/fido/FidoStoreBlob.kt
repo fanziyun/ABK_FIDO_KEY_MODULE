@@ -8,15 +8,9 @@ import java.util.zip.CRC32
  *
  * The layout is `struct abk_fido_store_disk` from
  * files/drivers/abk_fido_key/core.c: an 84-byte header followed by 32 fixed
- * 484-byte credential slots, all little-endian. The driver reads exactly
+ * 452-byte credential slots, all little-endian. The driver reads exactly
  * [SIZE] bytes and rejects anything whose CRC32 does not cover
  * `sign_count`..end, so every edit here has to reseal the blob.
- *
- * Version 2 adds a 32-byte hmac-secret per credential (Windows Hello offline
- * unlock). Version 1 blobs ([SIZE_V1] bytes, 452-byte slots) are still
- * accepted and are upgraded to the v2 layout in memory, so existing stores
- * keep working; the hmac-secret of every migrated credential starts as zero
- * ("no secret") until that credential is re-registered.
  */
 internal class FidoStoreBlob private constructor(private val raw: ByteArray) {
 

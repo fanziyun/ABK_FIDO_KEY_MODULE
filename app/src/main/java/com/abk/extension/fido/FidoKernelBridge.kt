@@ -18,7 +18,7 @@ private const val BOUND_PATH = "$SYSFS_BASE/bound"
 private const val HID_DEV_PATH = "$SYSFS_BASE/hid_dev"
 private const val TAG = "AbkFidoCompanion"
 
-data class PendingAuthRequest(
+internal data class PendingAuthRequest(
     val requestId: Int,
     val command: String,
     val rpId: String,
@@ -26,7 +26,7 @@ data class PendingAuthRequest(
     val rk: Boolean,
 )
 
-object FidoKernelBridge {
+internal object FidoKernelBridge {
     fun readPendingAuthRequest(): PendingAuthRequest? {
         val pending = RootShell.readTextFile(AUTH_PENDING_PATH)
         if (!pending.success) {

@@ -1,6 +1,5 @@
 <resources>
     <string name="app_name">ABK FIDO 助手</string>
-    <string name="diagnostics_title">ABK FIDO 诊断</string>
     <string name="status_syncing">正在将 FIDO 密钥库与当前持久化后端同步…</string>
     <string name="status_root_missing">无法获取 Root 权限，已跳过 FIDO 持久化同步。</string>
     <string name="status_success_prefix">同步完成：</string>

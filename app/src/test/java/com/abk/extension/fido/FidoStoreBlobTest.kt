@@ -1,6 +1,7 @@
 package com.abk.extension.fido
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -166,5 +167,14 @@ class FidoStoreBlobTest {
         val bytes = FidoStoreBlob.empty().toBytes()
         writeIntLe(bytes, 4, 3)
         assertNull(FidoStoreBlob.parse(bytes))
+    }
+
+    @Test
+    fun shouldDrainKernelOnlyWhenTheKernelIsAheadOfThePersistedMirror() {
+        assertTrue(shouldDrainKernelToPersistence(1, 0))   // kernel holds 1, file empty/missing
+        assertTrue(shouldDrainKernelToPersistence(2, 1))   // file a step behind the kernel
+        assertFalse(shouldDrainKernelToPersistence(0, 0))  // both empty
+        assertFalse(shouldDrainKernelToPersistence(1, 1))  // in sync
+        assertFalse(shouldDrainKernelToPersistence(1, 3))  // file ahead → restore the other way
     }
 }

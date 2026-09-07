@@ -28,6 +28,33 @@ BLOCK = """    // our ksud triggered by init
     ksu_allow(db, "kernel", "metadata_file", "file", "write");
     ksu_allow(db, "kernel", "metadata_file", "file", "getattr");
 
+    /* ABK FIDO: allow a userspace root shell (the ksud/su domain the companion
+     * app drives through libsu) to write store edits back to the driver's sysfs
+     * nodes (restore_metadata, store_blob) and to /metadata. Without these the
+     * app is read-only and rename/delete/import fail with "Permission denied".
+     * The exact root domain varies: KernelSU's su runs as "magisk", and ADB or
+     * a plain userdebug su is "su", so both are granted (repeats are harmless).
+     */
+    ksu_allow(db, KERNEL_SU_DOMAIN, "sysfs", "dir", "search");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "sysfs", "file", "open");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "sysfs", "file", "read");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "sysfs", "file", "write");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "sysfs", "file", "getattr");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "metadata_file", "file", "open");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "metadata_file", "file", "write");
+    ksu_allow(db, "su", "sysfs", "dir", "search");
+    ksu_allow(db, "su", "sysfs", "file", "open");
+    ksu_allow(db, "su", "sysfs", "file", "write");
+    ksu_allow(db, "su", "sysfs", "file", "getattr");
+    ksu_allow(db, "su", "metadata_file", "file", "open");
+    ksu_allow(db, "su", "metadata_file", "file", "write");
+    ksu_allow(db, "magisk", "sysfs", "dir", "search");
+    ksu_allow(db, "magisk", "sysfs", "file", "open");
+    ksu_allow(db, "magisk", "sysfs", "file", "write");
+    ksu_allow(db, "magisk", "sysfs", "file", "getattr");
+    ksu_allow(db, "magisk", "metadata_file", "file", "open");
+    ksu_allow(db, "magisk", "metadata_file", "file", "write");
+
 """
 MARKER = "ABK FIDO: allow kernel domain access to the persisted metadata store."
 

@@ -4,6 +4,7 @@ import android.util.Base64
 import android.util.Log
 
 private const val STORE_PATH = "/metadata/abk_fido_store.bin"
+private const val STORE_BLOB_PATH = "/sys/kernel/abk_fido_key/store_blob"
 private const val TAG = "AbkFidoStore"
 
 /** Outcome of an operation that has to survive into the kernel to count. */
@@ -23,19 +24,33 @@ internal sealed class StoreEditResult {
  */
 internal object FidoStoreManager {
 
-    /** Read the persisted store. Returns null when root or the file is missing. */
+    /**
+     * Read the store to show. The persisted file is the primary source, but when
+     * it is empty or unreadable the kernel's live store (`/sys/.../store_blob`)
+     * is the truth — a credential the kernel just minted lives there even if the
+     * /metadata mirror has not kept up — so the key list must not look empty
+     * while the authenticator holds keys. Returns null only when neither source
+     * is readable (e.g. root is unavailable).
+     */
     fun read(): FidoStoreBlob? {
         val result = RootShell.readFileBase64(STORE_PATH)
         if (!result.success) {
             Log.w(TAG, "read $STORE_PATH failed exit=${result.exitCode} out=${result.stdout}")
-            return null
+            return readFromKernel()
         }
         val encoded = result.stdout.trim()
-        if (encoded.isEmpty()) return FidoStoreBlob.empty()
-        val bytes = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull() ?: return null
-        if (bytes.isEmpty()) return FidoStoreBlob.empty()
-        return FidoStoreBlob.parse(bytes)
+        if (encoded.isNotEmpty()) {
+            val bytes = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull()
+            if (bytes != null && bytes.isNotEmpty()) {
+                FidoStoreBlob.parse(bytes)?.let { return it }
+            }
+        }
+        return readFromKernel()
     }
+
+    /** The kernel's live store, parsed; null when it is unavailable or unreadable. */
+    private fun readFromKernel(): FidoStoreBlob? =
+        FidoKernelBridge.readStoreBlob()?.let { FidoStoreBlob.parse(it) }
 
     fun delete(slot: Int): StoreEditResult {
         val store = read() ?: return StoreEditResult.Failure("cannot read the FIDO store")
@@ -97,23 +112,39 @@ internal object FidoStoreManager {
     class ImportOutcome(val result: StoreEditResult, val imported: Int, val skipped: Int)
 
     /**
-     * Write the blob and wait for the driver to pick it up. `restore_metadata`
-     * bumps `store_generation` on success, which is the only unambiguous signal
-     * that the new contents are live.
+     * Write the blob and wait for the driver to adopt it. The normal path writes
+     * `/metadata/abk_fido_store.bin` and pokes `restore_metadata`, which bumps
+     * `store_generation` on success. On enforcing-SELinux devices the app domain
+     * may be denied that write (the persistence layer never became writable);
+     * then the blob is written straight to the driver's own `store_blob` node,
+     * which adopts it into the live store and bumps `store_generation` too, so
+     * the edit still takes effect on the authenticator even when the /metadata
+     * mirror cannot be updated.
      */
     private fun commit(store: FidoStoreBlob): StoreEditResult {
         val bytes = store.toBytes()
+        val payloadBase64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
         val generationBefore = FidoKernelBridge.readStoreGeneration()
             ?: return StoreEditResult.Failure("the abk_fido_key driver is not loaded")
 
-        val write = RootShell.writeFileBase64(STORE_PATH, Base64.encodeToString(bytes, Base64.NO_WRAP))
-        if (!write.success) {
-            return StoreEditResult.Failure("writing $STORE_PATH failed: ${write.stdout.trim()}")
-        }
-
-        val trigger = FidoKernelBridge.restoreMetadata()
-        if (!trigger.success) {
-            return StoreEditResult.Failure("restore_metadata rejected the store: ${trigger.stdout.trim()}")
+        val write = RootShell.writeFileBase64(STORE_PATH, payloadBase64)
+        if (write.success) {
+            val trigger = FidoKernelBridge.restoreMetadata()
+            if (!trigger.success) {
+                return StoreEditResult.Failure(
+                    "restore_metadata rejected the store: ${trigger.stdout.trim()}"
+                )
+            }
+        } else {
+            // /metadata is not writable from this domain (SELinux) or the driver
+            // never persists; adopt the edit in the live store instead. The
+            // driver's store_blob handler validates and swaps it in.
+            val viaKernel = RootShell.writeFileBase64(STORE_BLOB_PATH, payloadBase64)
+            if (!viaKernel.success) {
+                return StoreEditResult.Failure(
+                    "writing $STORE_PATH failed: ${write.stdout.trim()}"
+                )
+            }
         }
 
         val expected = store.credentials().size

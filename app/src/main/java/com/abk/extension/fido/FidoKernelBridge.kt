@@ -1,5 +1,6 @@
 package com.abk.extension.fido
 
+import android.util.Base64
 import android.util.Log
 
 private const val SYSFS_BASE = "/sys/kernel/abk_fido_key"
@@ -16,6 +17,7 @@ private const val RELOAD_STORE_PATH = "$SYSFS_BASE/reload_store"
 private const val AUTH_GATE_ENABLED_PATH = "$SYSFS_BASE/auth_gate_enabled"
 private const val BOUND_PATH = "$SYSFS_BASE/bound"
 private const val HID_DEV_PATH = "$SYSFS_BASE/hid_dev"
+private const val STORE_BLOB_PATH = "$SYSFS_BASE/store_blob"
 private const val TAG = "AbkFidoCompanion"
 
 internal data class PendingAuthRequest(
@@ -86,6 +88,19 @@ internal object FidoKernelBridge {
 
     fun readStoreGeneration(): Int? =
         RootShell.readTextFile(STORE_GENERATION_PATH).stdout.trim().toIntOrNull()
+
+    /**
+     * The kernel's live store as a raw disk image (binary). The in-memory store
+     * is authoritative while the driver is up, so this is the source to drain
+     * when the persisted file has not kept up — a failed persist, a wiped
+     * /metadata, or a build that never writes. Reading it never clobbers the
+     * in-memory store: `abk_fido_load_store_locked()` is a no-op once loaded.
+     */
+    fun readStoreBlob(): ByteArray? =
+        RootShell.readFileExistsBase64(STORE_BLOB_PATH)
+            .takeIf { it.success }
+            ?.stdout?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { raw -> runCatching { Base64.decode(raw, Base64.DEFAULT) }.getOrNull() }
 
     fun restoreMetadata(): RootShell.CommandResult =
         RootShell.writeTextFile(RESTORE_METADATA_PATH, "1\n")

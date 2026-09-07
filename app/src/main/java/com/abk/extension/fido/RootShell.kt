@@ -44,6 +44,22 @@ internal object RootShell {
         )
     }
 
+    /**
+     * Like [readFileBase64] but existence-checked with `-e` instead of `-f`, so
+     * a read-only sysfs bin attribute (which can present differently to `test`)
+     * is accepted. Used for the kernel's `/sys/.../store_blob` node, which is a
+     * bin_attribute rather than a regular file.
+     */
+    fun readFileExistsBase64(path: String): CommandResult {
+        return run(
+            """
+            file=${shellQuote(path)}
+            [ -e "${'$'}file" ] || exit 3
+            base64 "${'$'}file" 2>/dev/null | tr -d '\n'
+            """.trimIndent()
+        )
+    }
+
     fun readTextFile(path: String): CommandResult {
         return run(
             """

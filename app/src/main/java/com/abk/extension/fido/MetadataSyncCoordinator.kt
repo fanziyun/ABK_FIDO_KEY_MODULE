@@ -90,8 +90,43 @@ internal class MetadataSyncCoordinator(context: Context) {
             repository.ensureSchema()
 
             val kernelCredentialCount = FidoKernelBridge.readCredentialCount() ?: 0
-            val persistedBlob = readPersistedBlob()
+            var persistedBlob = readPersistedBlob()
+            val persistedCount = persistedBlob?.bytes?.storeCredentialCount() ?: 0
             var localBlob = repository.loadSnapshot()
+
+            if (shouldDrainKernelToPersistence(kernelCredentialCount, persistedCount)) {
+                // Self-heal: the kernel's live store is ahead of the persisted
+                // mirror — the file empty, or a step behind a credential that was
+                // just minted but not written (a failed persist, a wiped
+                // /metadata, or a build that never writes). Drain the kernel into
+                // the persistence layer so the UI list (which reads the file)
+                // agrees with the status line (which reads the kernel count).
+                // Never touches the kernel's in-memory copy.
+                val kernelBlob = FidoKernelBridge.readStoreBlob()
+                when {
+                    kernelBlob == null ->
+                        notes += "kernel holds credentials but store_blob is unreadable"
+                    kernelBlob.storeCredentialCount() != kernelCredentialCount ->
+                        notes += "kernel store_blob count ${kernelBlob.storeCredentialCount()} != " +
+                            "$kernelCredentialCount; refusing to recover"
+                    else -> {
+                        val export = writeBlobToPersistence(
+                            PERSISTENCE_BACKENDS.first(), kernelBlob, notes
+                        )
+                        if (export == null) {
+                            notes += "kernel store recovered but persistence write failed"
+                        } else {
+                            notes += "recovered ${kernelBlob.storeCredentialCount()} credential(s) " +
+                                "from kernel store_blob into ${export.blobPath}"
+                            activeBackend = export
+                            persistedBlob = PersistedBlob(export, kernelBlob)
+                            localBlob = kernelBlob // syncSnapshot short-circuits ("already matches")
+                            repository.saveSnapshot(kernelBlob)
+                            notes += "sqlite snapshot restored from kernel store_blob"
+                        }
+                    }
+                }
+            }
 
             when {
                 persistedBlob != null -> {
@@ -351,6 +386,18 @@ private fun String.toNoteValue(): String {
     if (trimmed.isEmpty()) return "none"
     return trimmed.replace(Regex("\\s+"), " ")
 }
+
+/**
+ * When to drain the kernel's live store into the persistence layer. The kernel
+ * is authoritative for a credential it just minted, so when it holds more than
+ * the persisted mirror — the file empty, or the file a step behind — the mirror
+ * is refreshed from the kernel. The UI list reads the file while the status line
+ * reads the kernel count, so without this the two sources disagree forever.
+ * (The other direction, file ahead of an empty kernel, is handled by the
+ * existing file→kernel restore in [restoreKernelFromBlob].)
+ */
+internal fun shouldDrainKernelToPersistence(kernelCredentialCount: Int, persistedCredentialCount: Int): Boolean =
+    kernelCredentialCount > persistedCredentialCount
 
 private fun ByteArray.storeCredentialCount(): Int {
     if (size < STORE_DISK_HEADER_SIZE) return -1

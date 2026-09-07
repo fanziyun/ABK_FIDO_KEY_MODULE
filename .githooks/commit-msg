@@ -1,0 +1,5 @@
+#!/bin/sh
+# Strip any Claude co-author trailer from commit messages so every commit is
+# authored by the user only. Applies to every commit in this repo.
+# Ignore everything except the message file.
+sed -i '/^Co-Authored-By: Claude /d' "$1"

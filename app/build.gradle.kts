@@ -1,11 +1,24 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
 }
 
+// Local signing. Password/key alias come from the gitignored local.properties,
+// overridden by the ANDROID_SIGNING_* env vars that GitHub Actions sets. The
+// keystore ships at F:/Key/ABK_Fido, so no env var is needed for a local build.
+val signingProperties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
 val releaseSigningStoreFile = System.getenv("ANDROID_SIGNING_STORE_FILE")
+    ?: "F:\\Key\\ABK_Fido"
 val releaseSigningStorePassword = System.getenv("ANDROID_SIGNING_STORE_PASSWORD")
+    ?: signingProperties.getProperty("abk.storePassword")
 val releaseSigningKeyAlias = System.getenv("ANDROID_SIGNING_KEY_ALIAS")
+    ?: signingProperties.getProperty("abk.keyAlias")
 val releaseSigningKeyPassword = System.getenv("ANDROID_SIGNING_KEY_PASSWORD")
+    ?: signingProperties.getProperty("abk.keyPassword")
 val hasReleaseSigning = listOf(
     releaseSigningStoreFile,
     releaseSigningStorePassword,
@@ -22,7 +35,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 2
-        versionName = "0.3.0"
+        versionName = "0.4.0"
     }
 
     signingConfigs {

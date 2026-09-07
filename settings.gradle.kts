@@ -1,8 +1,13 @@
+// GitHub Actions runners are outside China and get 502 from maven.aliyun.com,
+// so the Aliyun mirrors are only used for local builds; CI falls straight back
+// to the official repositories.
 pluginManagement {
     repositories {
-        maven("https://maven.aliyun.com/repository/google")
-        maven("https://maven.aliyun.com/repository/gradle-plugin")
-        maven("https://maven.aliyun.com/repository/public")
+        if (System.getenv("GITHUB_ACTIONS") != "true") {
+            maven("https://maven.aliyun.com/repository/google")
+            maven("https://maven.aliyun.com/repository/gradle-plugin")
+            maven("https://maven.aliyun.com/repository/public")
+        }
         google()
         mavenCentral()
         gradlePluginPortal()
@@ -12,8 +17,10 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        maven("https://maven.aliyun.com/repository/google")
-        maven("https://maven.aliyun.com/repository/public")
+        if (System.getenv("GITHUB_ACTIONS") != "true") {
+            maven("https://maven.aliyun.com/repository/google")
+            maven("https://maven.aliyun.com/repository/public")
+        }
         google()
         mavenCentral()
         maven("https://jitpack.io")

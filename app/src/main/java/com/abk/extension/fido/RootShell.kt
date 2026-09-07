@@ -192,13 +192,14 @@ internal object RootShell {
     }
 
     fun launchFidoAuthPromptActivity(
+        packageName: String,
         requestId: Int,
         command: String,
         rpId: String,
     ): CommandResult {
         return run(
             """
-            am start -n 'com.abk.extension.fido/.FidoAuthPromptActivity' \
+            am start -n '${shellQuote(packageName)}/com.abk.extension.fido.FidoAuthPromptActivity' \
               --ei 'request_id' ${requestId} \
               --es 'command' ${shellQuote(command)} \
               --es 'rp_id' ${shellQuote(rpId)}

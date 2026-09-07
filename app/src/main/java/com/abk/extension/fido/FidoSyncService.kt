@@ -239,6 +239,7 @@ class FidoSyncService : Service() {
         BiometricAuthBridge.begin(pending.requestId)
         Log.i(TAG, "launching auth prompt requestId=${pending.requestId}")
         val launch = RootShell.launchFidoAuthPromptActivity(
+            packageName = packageName,
             requestId = pending.requestId,
             command = pending.command,
             rpId = pending.rpId

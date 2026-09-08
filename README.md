@@ -164,6 +164,57 @@ Install it either by flashing `build/ksu/abk_fido_selinux.zip` (built with
 ./scripts/install_abk_fido_selinux_module.sh
 ```
 
+### Bundled into the AnyKernel3 zip / 打包进 AnyKernel3 刷机包
+
+A kernel flash and a module flash are one action for the user, so the module
+rides inside the AnyKernel3 zip. ABK clones AnyKernel3 before it runs the
+external-module hooks, so `after_patch`/`before_build` writes
+`abk-ksu-modules/abk_fido_selinux.zip` into that tree and appends an installer
+block to `anykernel.sh`. The AK3 zip ABK builds later picks both up, and
+flashing the kernel zip installs the module in the same pass — `ksud module
+install`, then `magisk --install-module`, then a direct unpack into
+`/data/adb/modules/<id>` for recovery. The block is additive and non-fatal: the
+boot image is already written when it runs, so a failure only prints a warning.
+
+刷内核和刷模块对用户来说是一步，所以模块直接放进 AnyKernel3 刷机包。ABK 在运行
+外部模块 hook 之前就已经克隆好 AnyKernel3，因此 `after_patch`/`before_build` 会把
+`abk-ksu-modules/abk_fido_selinux.zip` 写进那棵树，并在 `anykernel.sh` 末尾追加一段
+安装代码。ABK 之后打出的 AK3 zip 自然带上两者，刷内核的同时就装好模块：先
+`ksud module install`，再 `magisk --install-module`，都不可用时（例如 recovery）
+直接解压到 `/data/adb/modules/<id>`。这段代码是追加的、且不会让刷机失败——它运行时
+boot 镜像已经写入，失败只打印警告。
+
+The hook lives in this repository (`scripts/abk_fido_setup.sh`), so **no ABK
+workflow change is needed**. `ak3_bundle_ksu_module.py` finds the AK3 tree on its
+own (`$ANYKERNEL3`, `$GITHUB_WORKSPACE/AnyKernel3`, or a sibling of the module
+checkout); when there is no AK3 tree it warns and the build continues.
+
+hook 就在本仓库里（`scripts/abk_fido_setup.sh`），**不需要改 ABK 的任何 yml**。
+`ak3_bundle_ksu_module.py` 会自己找 AK3 目录（`$ANYKERNEL3`、
+`$GITHUB_WORKSPACE/AnyKernel3`，或模块 checkout 的同级目录）；找不到时只告警，不
+中断构建。
+
+To bundle into a zip you already have (for example a manual AnyKernel3 build):
+
+给已经打好的 zip 补装模块（例如手动打包的 AnyKernel3）：
+
+```bash
+python3 scripts/ak3_bundle_ksu_module.py inject \
+    --zip Android15-6.6.98-AnyKernel3.zip --output AnyKernel3-abk-fido.zip
+python3 scripts/ak3_bundle_ksu_module.py verify --zip AnyKernel3-abk-fido.zip
+```
+
+`--ak3-dir /path/to/AnyKernel3` does the same for an extracted tree (used by the
+build hook), and `verify` fails if the module, the block or the module's `0755`
+scripts are missing. At flash time the installer prints
+`ABK FIDO: KernelSU module abk_fido_selinux installed via …`; when it cannot
+install, it tells you to flash `abk_fido_selinux.zip` manually.
+
+`--ak3-dir /path/to/AnyKernel3` 对解压出来的目录做同样的事（构建 hook 用的就是
+这条路径）；`verify` 会在模块、安装代码或模块内 `0755` 脚本缺失时报错。刷机时安装
+代码会打印 `ABK FIDO: KernelSU module abk_fido_selinux installed via …`，装不上时
+会提示手动刷 `abk_fido_selinux.zip`。
+
 The build-injected path (`patch_kernelsu_sepolicy_for_abk_fido.py`, applied by
 `after_patch`/`before_build` when `common/drivers/kernelsu/selinux/rules.c`
 exists) grants the same permissions, so a kernel that already patched `rules.c`
@@ -178,10 +229,12 @@ without that patch.
 
 - `after_patch`: install kernel files and patch
   `common/drivers/usb/gadget/configfs.c` plus
-  `common/drivers/kernelsu/selinux/rules.c` when KernelSU is present.
+  `common/drivers/kernelsu/selinux/rules.c` when KernelSU is present, then
+  bundle the KernelSU SELinux module into the AnyKernel3 tree.
 - `before_build`: do everything from `after_patch`, then enable the required
   `CONFIG_ABK_FIDO_KEY*` symbols in `DEFCONFIG`, including the metadata
-  persistence toggle.
+  persistence toggle. The AnyKernel3 bundling is idempotent, so running it twice
+  leaves exactly one installer block.
 
 The patch injects `abk_fido_key_prepare_config()` into the gadget config bind
 flow so the `abk_fido` function is added automatically when the USB gadget is

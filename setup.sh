@@ -25,12 +25,14 @@ case "$CUSTOM_EXTERNAL_MODULE_STAGE" in
     abk_fido_install_kernel_files
     abk_fido_patch_usb_gadget
     abk_fido_patch_kernelsu_sepolicy
+    abk_fido_bundle_ksu_module_into_ak3
     ;;
   before_build)
     abk_fido_install_kernel_files
     abk_fido_patch_usb_gadget
     abk_fido_patch_kernelsu_sepolicy
     abk_fido_enable_config
+    abk_fido_bundle_ksu_module_into_ak3
     ;;
   *)
     abk_die "unsupported CUSTOM_EXTERNAL_MODULE_STAGE: $CUSTOM_EXTERNAL_MODULE_STAGE"

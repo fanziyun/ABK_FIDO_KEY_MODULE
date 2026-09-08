@@ -48,6 +48,29 @@ abk_fido_patch_kernelsu_sepolicy() {
     || abk_die "ABK FIDO KernelSU sepolicy patch missing metadata_file allow rules"
 }
 
+# The KernelSU SELinux module must ship with the kernel, not as a second flash:
+# without it the driver's /metadata persist is denied and the app shows no keys.
+# ABK clones AnyKernel3 before the external-module hooks run, so the module is
+# injected into that tree and the AK3 zip built later picks it up. This keeps
+# the fix inside this repository: no ABK workflow change is needed.
+abk_fido_bundle_ksu_module_into_ak3() {
+  local output
+  if ! output="$(python3 "$MODULE_DIR/scripts/ak3_bundle_ksu_module.py" inject --ak3-dir auto 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    abk_die "failed to bundle the KernelSU SELinux module into the AnyKernel3 tree"
+  fi
+  case "$output" in
+    *"nothing to bundle"*)
+      abk_warn "$output"
+      abk_warn "the AK3 zip will not install the module; flash ksu/abk_fido_selinux manually"
+      return 0
+      ;;
+  esac
+  abk_log "$output"
+  python3 "$MODULE_DIR/scripts/ak3_bundle_ksu_module.py" verify --ak3-dir auto >/dev/null \
+    || abk_die "the AnyKernel3 tree does not carry a valid KernelSU module bundle"
+}
+
 abk_fido_enable_config() {
   abk_enable_config CONFIG_ABK_FIDO_KEY
   abk_enable_config CONFIG_ABK_FIDO_KEY_CTAP2

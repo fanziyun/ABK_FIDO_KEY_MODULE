@@ -1,63 +1,69 @@
 #!/usr/bin/env bash
 # Install the KernelSU module that lets the ABK FIDO driver's *kernel* domain
-# (and the root shell the companion app runs) read and write the persisted
-# store at /metadata/abk_fido_store.bin plus the driver's sysfs nodes.
+# read and write the persisted store at /metadata/abk_fido_store.bin.
 #
-# Why this is needed: the driver opens /metadata with a kernel domain credential
-# (prepare_kernel_cred -> u:r:kernel:s0), and on enforcing SELinux that domain
-# is denied metadata_file access, so every restore_metadata / persist fails with
+# Why this is needed: the driver opens the blob with a kernel-domain credential
+# (prepare_kernel_cred -> u:r:kernel:s0), and on an enforcing device that domain
+# is denied metadata_file access, so every persist and restore fails with -13:
 #
-#     restore_metadata rejected the store: ... Permission denied
+#     persist deferred (will retry): persist open /metadata/abk_fido_store.bin failed: -13
 #
-# The compiled-in KernelSU rules.c path (patch_kernelsu_sepolicy_for_abk_fido.py)
-# is unreliable across KernelSU builds, so ship the rule as a KernelSU module
-# instead: `sepolicy.rule` is auto-applied every boot, and `post-fs-data.sh`
-# re-patches as a fallback. Both run in enforce mode — this never switches SELinux
-# to permissive.
+# The file then stays 0 bytes and the companion app's "Registered FIDO keys"
+# list stays empty even though the credential is live in the driver. The rules
+# live in ksu/abk_fido_selinux/sepolicy.rule, are applied by KernelSU every
+# boot, and post-fs-data.sh re-applies them as a fallback. SELinux stays
+# enforcing — this never switches to permissive.
 #
 # Usage:
-#   ./scripts/install_abk_fido_selinux_module.sh            # install to the first adb device
+#   ./scripts/install_abk_fido_selinux_module.sh            # first adb device
 #   ADB="adb -s <serial>" ./scripts/install_abk_fido_selinux_module.sh
-set -e
+set -euo pipefail
 
-ADB="${ADB:-adb}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODULE_ID=abk_fido_selinux
+ZIP="$REPO_DIR/build/ksu/$MODULE_ID.zip"
+RULE_SRC="$REPO_DIR/ksu/$MODULE_ID/sepolicy.rule"
+REMOTE_ZIP=/data/local/tmp/$MODULE_ID.zip
+REMOTE_RULE=/data/local/tmp/$MODULE_ID.sepolicy.rule
 
-echo "==> creating /data/adb/modules/abk_fido_selinux"
-"$ADB" shell 'su -c "mkdir -p /data/adb/modules/abk_fido_selinux"'
+# Git Bash and MSYS rewrite /data/... into a Windows path, which breaks every
+# adb argument that is a device path. Both variables are no-ops elsewhere, and
+# the native tools below get an explicit Windows spelling instead.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
 
-echo "==> writing module.prop"
-cat <<'EOF' | "$ADB" shell 'su -c "cat > /data/adb/modules/abk_fido_selinux/module.prop"'
-id=abk_fido_selinux
-name=ABK FIDO SELinux rules
-version=v1.0
-versionCode=1
-author=abk
-description=Allow kernel domain to read/write the /metadata ABK FIDO store.
-EOF
+read -r -a ADB_CMD <<<"${ADB:-adb}"
 
-echo "==> writing sepolicy.rule (auto-applied at boot)"
-cat <<'EOF' | "$ADB" shell 'su -c "cat > /data/adb/modules/abk_fido_selinux/sepolicy.rule"'
-allow kernel metadata_file dir search
-allow kernel metadata_file file { open read write getattr create }
-EOF
+if command -v cygpath >/dev/null 2>&1; then
+  PYTHON_REPO_DIR="$(cygpath -w "$REPO_DIR")"
+  PUSH_ZIP="$(cygpath -w "$ZIP")"
+  PUSH_RULE="$(cygpath -w "$RULE_SRC")"
+else
+  PYTHON_REPO_DIR="$REPO_DIR"
+  PUSH_ZIP="$ZIP"
+  PUSH_RULE="$RULE_SRC"
+fi
 
-echo "==> writing post-fs-data.sh (fallback re-patch)"
-cat <<'EOF' | "$ADB" shell 'su -c "cat > /data/adb/modules/abk_fido_selinux/post-fs-data.sh"'
-#!/system/bin/sh
-# Reassert kernel-domain /metadata access every boot, in case sepolicy.rule is
-# not applied by this KernelSU build. Runs as root.
-KS=/data/adb/ksu/bin/ksud
-$KS sepolicy patch "allow kernel metadata_file dir search" 2>/dev/null
-$KS sepolicy patch "allow kernel metadata_file file { open read write getattr create }" 2>/dev/null
-EOF
+echo "==> packaging ksu/$MODULE_ID"
+python3 "$PYTHON_REPO_DIR/scripts/build_ksu_module.py"
 
-echo "==> setting permissions"
-"$ADB" shell 'su -c "chmod 755 /data/adb/modules/abk_fido_selinux/post-fs-data.sh; chmod 644 /data/adb/modules/abk_fido_selinux/module.prop; chmod 644 /data/adb/modules/abk_fido_selinux/sepolicy.rule"'
+echo "==> pushing the module and its rules"
+"${ADB_CMD[@]}" push "$PUSH_ZIP" "$REMOTE_ZIP"
+"${ADB_CMD[@]}" push "$PUSH_RULE" "$REMOTE_RULE"
 
-echo "==> apply immediately for this session (no reboot needed for the current run)"
-"$ADB" shell 'su -c "/data/adb/ksu/bin/ksud sepolicy patch \"allow kernel metadata_file dir search\" >/dev/null 2>&1; /data/adb/ksu/bin/ksud sepolicy patch \"allow kernel metadata_file file { open read write getattr create }\" >/dev/null 2>&1"'
+echo "==> installing with ksud module install"
+"${ADB_CMD[@]}" shell "su -c 'ksud module install $REMOTE_ZIP'"
 
-echo "==> done. Verify the driver can now restore the store:"
-echo "    adb shell su -c 'printf 1 > /sys/kernel/abk_fido_key/restore_metadata; echo err=\$(cat /sys/kernel/abk_fido_key/last_error); echo cnt=\$(cat /sys/kernel/abk_fido_key/credential_count)'"
-echo "    expect empty err and the real credential count (not -13)."
-echo "    Reboot for the rules to persist; the module survives (KernelSU module)."
+echo "==> applying the rules to the running policy (no reboot needed)"
+# ksud installs into /data/adb/modules_update until the next boot, so the rules
+# are applied from the pushed copy rather than from the module directory.
+"${ADB_CMD[@]}" shell "su -c 'ksud sepolicy apply $REMOTE_RULE'"
+
+echo "==> done. The rules survive a reboot; verify with:"
+echo "    adb shell su -c 'cat /sys/kernel/abk_fido_key/last_trace'"
+echo "    adb shell 'dmesg | grep \"avc.*metadata_file\" | tail -5'   # no new denials"
+echo "    adb shell su -c 'printf 1 > /sys/kernel/abk_fido_key/restore_metadata'"
+echo "    adb shell su -c 'cat /sys/kernel/abk_fido_key/last_trace'   # ... via restore_metadata"
+echo "    expect an empty last_error and a real credential count, not -13."
+echo "    The companion app must be 0.4.0 (versionCode 2) or newer: 0.2.0 cannot"
+echo "    parse the version 2 store blob and has no /sys store_blob fallback."

@@ -1,0 +1,6 @@
+id=abk_fido_selinux
+name=ABK FIDO SELinux rules
+version=v1.0
+versionCode=1
+author=abk
+description=Allow the abk_fido_key driver (kernel domain) to read and write /metadata/abk_fido_store.bin so the FIDO store survives a reboot. Enforce-safe, no permissive mode.

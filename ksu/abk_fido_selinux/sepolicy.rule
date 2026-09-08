@@ -1,0 +1,7 @@
+# The driver opens /metadata/abk_fido_store.bin from the kernel domain
+# (prepare_kernel_cred -> u:r:kernel:s0). Enforcing SELinux denies both read and
+# write there, so the store never persists and the companion app's key list stays
+# empty even though the credential lives in the driver's memory.
+allow kernel metadata_file dir { search open read getattr }
+allow kernel metadata_file dir { write add_name }
+allow kernel metadata_file file { open read write getattr create }

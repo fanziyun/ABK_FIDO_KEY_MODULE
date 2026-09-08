@@ -60,6 +60,9 @@ What it adds / 它会增加这些内容:
 - `files/drivers/abk_fido_key/`: kernel driver source, Kconfig, and Makefile.
 - `files/include/linux/abk_fido_key.h`: public kernel header used by the
   configfs injection point.
+- `ksu/abk_fido_selinux/`: KernelSU module that grants the driver's kernel
+  domain access to the `/metadata` store; `scripts/build_ksu_module.py` packs it
+  into a flashable zip.
 - `app/`, `build.gradle.kts`, `settings.gradle.kts`: minimal Android companion
   app project for the metadata-backed SQLite mirror.
 - `agent/`: Go desktop bridge that relays CTAP frames to a local virtual HID
@@ -119,6 +122,57 @@ Then rebuild:
 ```bash
 ./rebuild.sh --reseed
 ```
+
+### KernelSU SELinux module / KernelSU SELinux 模块
+
+On an enforcing device the driver cannot touch its own store. It opens
+`/metadata/abk_fido_store.bin` with a kernel-domain credential
+(`prepare_kernel_cred` → `u:r:kernel:s0`), and SELinux denies both read and
+write on `metadata_file`, so persistence fails with `-13` and the companion
+app's **Registered FIDO keys** list stays empty even though the credential is
+live in the driver:
+
+在强制模式下驱动打不开自己的存储：它用内核域凭据
+（`prepare_kernel_cred` → `u:r:kernel:s0`）打开
+`/metadata/abk_fido_store.bin`，而 SELinux 对 `metadata_file` 的读和写都拒绝，
+于是持久化以 `-13` 失败，即使凭据就在驱动内存里，配套 App 的
+**Registered FIDO keys** 列表也是空的。
+
+```text
+avc: denied { write } for comm="kworker/1:0" name="abk_fido_store.bin"
+  scontext=u:r:kernel:s0 tcontext=u:object_r:metadata_file:s0 tclass=file
+avc: denied { read } for comm="printf" name="abk_fido_store.bin"
+  scontext=u:r:kernel:s0 tcontext=u:object_r:metadata_file:s0 tclass=file
+```
+
+`ksu/abk_fido_selinux/` is a KernelSU module that adds those rules.
+`sepolicy.rule` is applied by KernelSU every boot, `post-fs-data.sh` re-applies
+it as a fallback and pre-creates the store file. SELinux stays enforcing: the
+rules are additive, nothing switches to permissive.
+
+`ksu/abk_fido_selinux/` 就是补这些规则的 KernelSU 模块。`sepolicy.rule` 由
+KernelSU 每次开机自动应用，`post-fs-data.sh` 作为兜底再次应用并预创建存储文件。
+SELinux 保持强制模式：规则是叠加的，不会切到 permissive。
+
+Install it either by flashing `build/ksu/abk_fido_selinux.zip` (built with
+`python3 scripts/build_ksu_module.py`) in the KernelSU manager, or over adb:
+
+可以刷入 `python3 scripts/build_ksu_module.py` 生成的
+`build/ksu/abk_fido_selinux.zip`，也可以用 adb 安装：
+
+```bash
+./scripts/install_abk_fido_selinux_module.sh
+```
+
+The build-injected path (`patch_kernelsu_sepolicy_for_abk_fido.py`, applied by
+`after_patch`/`before_build` when `common/drivers/kernelsu/selinux/rules.c`
+exists) grants the same permissions, so a kernel that already patched `rules.c`
+does not need the module. The module is for a device whose kernel was built
+without that patch.
+
+编译期注入的路径（`patch_kernelsu_sepolicy_for_abk_fido.py`，在存在
+`rules.c` 时由 `after_patch`/`before_build` 应用）授予同样的权限，因此已经打过
+`rules.c` 的内核不需要这个模块；模块是给内核没带该补丁的设备用的。
 
 ## Stage Behavior / 阶段行为
 
@@ -273,6 +327,13 @@ After a successful build and boot, check:
 - after a credential change, `/metadata/abk_fido_store.bin` exists
 - writing `1` to `/sys/kernel/abk_fido_key/restore_metadata` increments
   `store_generation` and restores the expected `credential_count`
+- `/data/adb/modules/abk_fido_selinux` exists (or the build injected the same
+  rules into `rules.c`), and `dmesg` shows no new
+  `avc: denied ... tcontext=u:object_r:metadata_file:s0` line after a credential
+  change
+- `/sys/kernel/abk_fido_key/last_trace` reports `persisted store to
+  /metadata/abk_fido_store.bin` after a credential change and
+  `store loaded from /metadata/abk_fido_store.bin` after a reboot
 - `/sys/kernel/abk_fido_key/last_error` is empty after a successful restore
 - `/sys/kernel/abk_fido_key/last_trace` reports the metadata restore path
 - after the companion app sync runs, `/metadata/abk_fido.db` exists
@@ -376,6 +437,15 @@ offer the FIDO SQLite mirror APK alongside the kernel module.
   持久化存储升级为版本 2（每凭据携带 hmac-secret）；版本 1 的旧 blob 仍可
   读取并在下次写入时升级。迁移过来的旧凭据没有 hmac-secret，离线解锁前需
   重新注册。0.2.0 版配套 App 无法解析新 blob，请同步更新。
+- The companion app must be 0.4.0 (versionCode 2) or newer. A 0.2.0 build reads
+  only `/metadata/abk_fido_store.bin` (no `/sys/.../store_blob` fallback) and
+  its blob parser accepts version 1 only, so the version 2 store the driver
+  writes looks unreadable and **Registered FIDO keys** stays empty even once
+  the SELinux rules are in place. Update the app together with the kernel.
+  配套 App 必须是 0.4.0（versionCode 2）或更新版本。0.2.0 只读
+  `/metadata/abk_fido_store.bin`（没有 `/sys/.../store_blob` 兜底），且其 blob
+  解析器只接受版本 1，因此驱动写出的版本 2 存储会被判为不可读，即使 SELinux
+  规则已经就位，**Registered FIDO keys** 依旧为空。请与内核一起更新 App。
 - The LAN relay needs a virtual HID device on the desktop, and creating one is
   privileged on both platforms: on Linux the agent uses `/dev/uhid` and must run
   as root; on Windows it needs the `abkfidovhid` driver from
